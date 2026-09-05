@@ -21,6 +21,8 @@ private sealed interface MdPart {
     data class Text(val text: String) : MdPart
     data class Code(val lang: String, val code: String) : MdPart
     data class Bullets(val items: List<String>, val numbered: Boolean) : MdPart
+    data class Quote(val text: String) : MdPart
+    data class Header(val level: Int, val text: String) : MdPart
     data class Table(val head: List<String>, val rows: List<List<String>>) : MdPart
 }
 
@@ -66,6 +68,24 @@ private fun splitBlocks(src: String): List<MdPart> {
                 i++
             }
             if (head.isNotEmpty()) out.add(MdPart.Table(head, rows.take(20)))
+            continue
+        }
+        val qs = ln.trimStart()
+        if (qs.startsWith("> ")) {
+            flushPara()
+            val buf = StringBuilder()
+            while (i < lines.size && lines[i].trimStart().startsWith("> ")) {
+                buf.appendLine(lines[i].trimStart().removePrefix(">").trimStart())
+                i++
+            }
+            out.add(MdPart.Quote(buf.toString().trimEnd()))
+            continue
+        }
+        val hm = Regex("^(#{1,4})\\s+(.+)").find(ln.trimStart())
+        if (hm != null) {
+            flushPara()
+            out.add(MdPart.Header(hm.groupValues[1].length, hm.groupValues[2].trim().take(200)))
+            i++
             continue
         }
         para.appendLine(ln)
@@ -191,6 +211,28 @@ fun MarkdownText(text: String, fontSize: TextUnit, modifier: Modifier = Modifier
                                 }
                             }
                         }
+                    }
+                }
+                is MdPart.Quote -> {
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        SelectionContainer {
+                            Text(inlineStyled(p.text, monoBg), fontSize = fontSize,
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                modifier = Modifier.padding(10.dp))
+                        }
+                    }
+                }
+                is MdPart.Header -> {
+                    SelectionContainer {
+                        Text(
+                            inlineStyled(p.text, monoBg),
+                            fontSize = fontSize * (1.25f - p.level * 0.08f),
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
                 is MdPart.Table -> {

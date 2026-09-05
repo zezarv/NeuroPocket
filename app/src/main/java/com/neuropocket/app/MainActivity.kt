@@ -15,6 +15,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.neuropocket.app.ui.*
@@ -48,6 +49,26 @@ class MainActivity : ComponentActivity() {
         handleShare(intent)
         setContent {
             NeuroTheme(theme = vm.theme, accentHex = vm.accent) {
+                // Системные бары в цвет темы (иначе белые полосы сверху/снизу)
+                val darkBars = when (vm.theme) {
+                    "dark" -> true
+                    "light" -> false
+                    else -> androidx.compose.foundation.isSystemInDarkTheme()
+                }
+                val sysView = androidx.compose.ui.platform.LocalView.current
+                val barColor = MaterialTheme.colorScheme.surface.toArgb()
+                val darkIcons = !darkBars
+                androidx.compose.runtime.SideEffect {
+                    try {
+                        val w = (sysView.context as android.app.Activity).window
+                        w.statusBarColor = barColor
+                        w.navigationBarColor = barColor
+                        androidx.core.view.WindowInsetsControllerCompat(w, sysView).apply {
+                            isAppearanceLightStatusBars = darkIcons
+                            isAppearanceLightNavigationBars = darkIcons
+                        }
+                    } catch (_: Exception) { }
+                }
                 var tab by remember { mutableIntStateOf(0) }
                 var hubRoute by remember { mutableStateOf<String?>(null) }
                 var overlay by remember { mutableStateOf<String?>(null) }

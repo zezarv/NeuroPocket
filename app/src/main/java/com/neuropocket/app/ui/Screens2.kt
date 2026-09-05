@@ -25,6 +25,7 @@ import java.io.File
 @Composable
 fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
     var composer by remember { mutableStateOf("") }
+    var feedFind by remember { mutableStateOf("") }
     var tagFilter by remember { mutableStateOf("Все") }
     var authorMenu by remember { mutableStateOf(false) }
     var authorId by remember { mutableStateOf(vm.personas.firstOrNull()?.id ?: "") }
@@ -35,9 +36,16 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
             .groupingBy { it }.eachCount().toList()
             .sortedByDescending { it.second }.take(12)
     }
-    val shown = remember(vm.posts, tagFilter) {
-        val all = vm.posts.sortedByDescending { it.ts }
-        if (tagFilter == "Все") all else all.filter { tagFilter in com.neuropocket.app.data.extractTags(it.text) }
+    val shown = remember(vm.posts, tagFilter, feedFind, vm.personas) {
+        var all = vm.posts.sortedByDescending { it.ts }
+        if (tagFilter != "Все") all = all.filter { tagFilter in com.neuropocket.app.data.extractTags(it.text) }
+        if (feedFind.isNotBlank()) {
+            all = all.filter { pst ->
+                pst.text.contains(feedFind, true) ||
+                    (vm.personas.find { it.id == pst.authorId }?.name ?: "").contains(feedFind, true)
+            }
+        }
+        all
     }
 
     Scaffold(topBar = { TopAppBar(title = { Text("Лента") }, actions = {
@@ -91,6 +99,11 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                 }
                 Text("Фон: случайная персона, движок — твой провайдер или шаблоны.",
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+            }
+            item {
+                OutlinedTextField(feedFind, { feedFind = it }, label = { Text("Найти в ленте…") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true)
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

@@ -1193,8 +1193,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             )
             val nl = Store.loadPersonas(ctx).toMutableList().apply { add(np) }
             Store.savePersonas(ctx, nl)
+            // аватар рядом с json? models/persona-<имя>.jpg -> avatars/<id>.jpg
+            var finalList: List<Persona> = nl
+            try {
+                val safe = np.name.replace(Regex("[^A-Za-z0-9а-яА-ЯёЁ _-]"), "_").trim().take(40).ifBlank { "persona" }
+                val cand = java.io.File(Store.modelsDir(ctx), "persona-$safe.jpg")
+                if (cand.exists()) {
+                    cand.copyTo(java.io.File(avatarsDir(), "${np.id}.jpg"), overwrite = true)
+                    finalList = Store.loadPersonas(ctx).map {
+                        if (it.id == np.id) it.copy(avatarPath = java.io.File(avatarsDir(), "${np.id}.jpg").absolutePath)
+                        else it
+                    }
+                    Store.savePersonas(ctx, finalList)
+                }
+            } catch (_: Exception) { }
             withContext(Dispatchers.Main) {
-                personas = nl
+                personas = finalList
                 status = "Импортирована: ${np.name}"
             }
         } catch (e: Exception) {
