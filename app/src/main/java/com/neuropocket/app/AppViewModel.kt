@@ -59,6 +59,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var showTime by mutableStateOf(false); private set
     var serverTimeout by mutableStateOf(120); private set
     var vadSil by mutableStateOf(42); private set
+    var bargeIn by mutableStateOf(false); private set
+    private var vadInst: com.k2fsa.sherpa.onnx.Vad? = null
     var vadMin by mutableStateOf(8000); private set
     var autoFallback by mutableStateOf(true); private set
     var onboarded by mutableStateOf(true); private set
@@ -280,6 +282,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             showTime = Store.getShowTime(ctx); serverTimeout = Store.getServerTimeout(ctx)
             autopostHours = Store.getAutopost(ctx)
             vadSil = Store.getVadSil(ctx); vadMin = Store.getVadMin(ctx)
+            bargeIn = Store.getBargeIn(ctx)
             applyAutopostWork(autopostHours)
             applyAutoBackupWork(autoBackup)
             autoFallback = Store.getAutoFallback(ctx); onboarded = Store.isOnboarded(ctx)
@@ -308,7 +311,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Store.saveMsgMap(ctx, map)
     }
 
-    private fun deviceBusy(): Boolean = busy || agentRunning || sdBusy || visionBusy
+    private fun deviceBusy(): Boolean = busy || agentRunning || sdBusy || visionBusy || pBusy || hfRunning || benchRunning || ragBusy || toolBusyId != null
 
     fun newChat() {
         if (deviceBusy()) { status = "Дождись конца генерации."; return }
@@ -838,6 +841,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val eng = sherpa ?: return@withContext false
         speakStop = false
         withContext(Dispatchers.Main) { speaking = true }
+        // barge-in: слушаем микрофон поверх речи, при устойчивой речи — стоп
+        val monitor = if (bargeIn) startBargeMonitor() else null
         try {
             for (s in com.neuropocket.app.voice.splitSentences(text)) {
                 if (speakStop) break
@@ -845,8 +850,64 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 player.play(audio)
             }
         } catch (_: Exception) { }
+        try { monitor?.cancel() } catch (_: Exception) { }
         withContext(Dispatchers.Main) { speaking = false }
         true
+    }
+
+    /** Фоновый слушатель для barge-in. Возвращает job или null. */
+    private fun startBargeMonitor(): kotlinx.coroutines.Job? {
+        val vadF = try { vadFile() } catch (_: Exception) { return null }
+        if (!vadF.exists()) return null
+        return viewModelScope.launch(Dispatchers.IO) {
+            var vad: com.k2fsa.sherpa.onnx.Vad? = null
+            var rec: android.media.AudioRecord? = null
+            try {
+                vad = vadInst ?: com.k2fsa.sherpa.onnx.Vad(
+                    config = com.k2fsa.sherpa.onnx.VadModelConfig(
+                        sileroVadModelConfig = com.k2fsa.sherpa.onnx.SileroVadModelConfig(model = vadF.absolutePath),
+                        sampleRate = 16000
+                    )
+                ).also { vadInst = it }
+                val minBuf = android.media.AudioRecord.getMinBufferSize(
+                    16000, android.media.AudioFormat.CHANNEL_IN_MONO,
+                    android.media.AudioFormat.ENCODING_PCM_16BIT)
+                if (minBuf <= 0) return@launch
+                rec = android.media.AudioRecord(
+                    android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION, 16000,
+                    android.media.AudioFormat.CHANNEL_IN_MONO,
+                    android.media.AudioFormat.ENCODING_PCM_16BIT, minBuf * 2)
+                if (rec.state != android.media.AudioRecord.STATE_INITIALIZED) return@launch
+                rec.startRecording()
+                val sb = ShortArray(512)
+                val fb = FloatArray(512)
+                var hits = 0
+                // первые ~0.7с игнорируем (остатки прошлой фразы/эхо старта)
+                var skip = 22
+                while (!speakStop) {
+                    val n = try { rec.read(sb, 0, sb.size) } catch (_: Exception) { -1 }
+                    if (n <= 0) {
+                        kotlinx.coroutines.delay(30)
+                        continue
+                    }
+                    for (i in 0 until n) fb[i] = sb[i] / 32768f
+                    try { vad.acceptWaveform(fb.copyOf(n)) } catch (_: Exception) { break }
+                    val speech = try { vad.isSpeechDetected() } catch (_: Exception) { false }
+                    if (skip > 0) {
+                        skip--
+                        try { vad.reset() } catch (_: Exception) { }
+                        continue
+                    }
+                    if (speech && ++hits >= 8) {
+                        speakStop = true
+                        try { player.stop() } catch (_: Exception) { }
+                        break
+                    }
+                    if (!speech) hits = 0
+                }
+            } catch (_: Exception) { }
+            try { rec?.stop(); rec?.release() } catch (_: Exception) { }
+        }
     }
 
     var storageInfo by mutableStateOf(""); private set
@@ -1505,6 +1566,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun applyVadSil(v: Int) { viewModelScope.launch { Store.setVadSil(ctx, v); vadSil = v } }
     fun applyVadMin(v: Int) { viewModelScope.launch { Store.setVadMin(ctx, v); vadMin = v } }
+    fun applyBargeIn(v: Boolean) { viewModelScope.launch { Store.setBargeIn(ctx, v); bargeIn = v } }
 
     fun applyAutopost(h: Int) {
         viewModelScope.launch {
@@ -2251,6 +2313,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun runBench() {
         if (benchRunning || !llama.loaded()) return
+        if (deviceBusy()) { status = "Дождись конца текущей задачи."; return }
         if (deviceBusy()) { status = "Дождись конца текущей задачи."; return }
         benchRunning = true
         benchResult = ""

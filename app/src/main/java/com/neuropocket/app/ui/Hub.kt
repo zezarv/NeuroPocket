@@ -74,12 +74,22 @@ fun HubScreen(
             }
         }
         item {
-            // Hero как в референсе: крупная карточка чата
+            // Hero: лёгкий градиент от акцента к поверхности
+            val heroBrush = androidx.compose.ui.graphics.Brush.horizontalGradient(
+                listOf(
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
+                    MaterialTheme.colorScheme.surfaceVariant
+                )
+            )
             Card(
                 modifier = Modifier.fillMaxWidth().clickable { onNewChat() },
                 shape = MaterialTheme.shapes.large,
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
             ) {
+                Box(
+                    modifier = Modifier.fillMaxWidth()
+                        .background(heroBrush, MaterialTheme.shapes.large)
+                ) {
                 Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -105,6 +115,7 @@ fun HubScreen(
                     Icon(Icons.Default.ChatBubbleOutline, contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
                         modifier = Modifier.size(110.dp))
+                }
                 }
             }
         }

@@ -399,6 +399,8 @@ fun PersonasScreen(
                 }
                 Spacer(Modifier.height(6.dp))
                 Button(onClick = { vm.addPersona(name, prompt, emoji, desc, tags, temp, pvoice); name = ""; prompt = ""; desc = ""; tags = ""; pvoice = "" }, modifier = Modifier.fillMaxWidth()) { Text("Создать") }
+                Text("Импорт подхватит и аватар: положи рядом persona-<имя>.jpg.",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
                 Text("Совет: для NSFW-персон опиши возраст 18+, границы и стиль напрямую в промпте — фильтра в приложении нет, всё локально.",
                     style = MaterialTheme.typography.labelSmall)
             }
@@ -412,7 +414,8 @@ fun ToolsScreen(
     vm: AppViewModel,
     onBack: (() -> Unit)? = null,
     initialCard: String = "",
-    onOpenTool: (String) -> Unit = {}
+    onOpenTool: (String) -> Unit = {},
+    onOpenChats: () -> Unit = {}
 ) {
     var box by remember { mutableStateOf("") }
     var agentTask by remember { mutableStateOf("") }
@@ -547,6 +550,15 @@ fun ToolsScreen(
                                     valueRange = 4000f..24000f, steps = 4, modifier = Modifier.fillMaxWidth())
                             }
                         }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Перебивать голосом (barge-in)", style = MaterialTheme.typography.bodyMedium)
+                                Text("Нужен VAD. Эхо колонок может срабатывать ложно.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.secondary)
+                            }
+                            Switch(checked = vm.bargeIn, onCheckedChange = { vm.applyBargeIn(it) })
+                        }
                         if (!vm.hfRunning) {
                             Button(onClick = {
                                 val ok = androidx.core.content.ContextCompat.checkSelfPermission(
@@ -611,6 +623,7 @@ fun ToolsScreen(
                                     Text(vm.visionResult)
                                     TextButton(onClick = {
                                         vm.discussInChat("Про фото: ${vm.visionResult.take(1000)}")
+                                        onOpenChats()
                                     }) { Text("В новый чат") }
                                 }
                             }
@@ -671,6 +684,7 @@ fun ToolsScreen(
                                     Text(vm.ragResult)
                                     TextButton(onClick = {
                                         vm.discussInChat("По заметкам: ${vm.ragResult.take(1000)}")
+                                        onOpenChats()
                                     }) { Text("В новый чат") }
                                 }
                             }
@@ -748,7 +762,10 @@ fun ToolsScreen(
                             OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                                 Column(Modifier.padding(10.dp)) {
                                     Text(vm.whisperResult)
-                                    TextButton(onClick = { vm.discussInChat("Обработай транскрипт: ${vm.whisperResult.take(1000)}") }) { Text("В новый чат") }
+                                    TextButton(onClick = {
+                                        vm.discussInChat("Обработай транскрипт: ${vm.whisperResult.take(1000)}")
+                                        onOpenChats()
+                                    }) { Text("В новый чат") }
                                 }
                             }
                         }
@@ -797,7 +814,10 @@ fun ToolsScreen(
                                 Column(Modifier.padding(10.dp)) {
                                     Text("Итог:", style = MaterialTheme.typography.labelMedium)
                                     Text(vm.agentResult)
-                                    TextButton(onClick = { vm.discussInChat("Агент выполнил задачу «${agentTask.take(200)}». Итог: ${vm.agentResult.take(1000)}") }) {
+                                    TextButton(onClick = {
+                                        vm.discussInChat("Агент выполнил задачу «${agentTask.take(200)}». Итог: ${vm.agentResult.take(1000)}")
+                                        onOpenChats()
+                                    }) {
                                         Text("В новый чат")
                                     }
                                 }

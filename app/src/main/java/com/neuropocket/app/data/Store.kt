@@ -46,6 +46,7 @@ object Store {
     private val KEY_SRVTO = intPreferencesKey("server_timeout")
     private val KEY_VADSIL = intPreferencesKey("vad_silence")
     private val KEY_VADMIN = intPreferencesKey("vad_min")
+    private val KEY_BARGE = booleanPreferencesKey("barge_in")
     private val KEY_AUTOPOST = intPreferencesKey("autopost_hours")
     private val KEY_AUTOFB = booleanPreferencesKey("auto_fallback")
     private val KEY_ONBOARD = booleanPreferencesKey("onboarded")
@@ -171,6 +172,8 @@ object Store {
     suspend fun getVadSil(ctx: Context): Int = ctx.ds.data.map { it[KEY_VADSIL] ?: 42 }.first()
     suspend fun setVadSil(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_VADSIL] = v } }
     suspend fun getVadMin(ctx: Context): Int = ctx.ds.data.map { it[KEY_VADMIN] ?: 8000 }.first()
+    suspend fun getBargeIn(ctx: Context): Boolean = ctx.ds.data.map { it[KEY_BARGE] ?: false }.first()
+    suspend fun setBargeIn(ctx: Context, v: Boolean) { ctx.ds.edit { it[KEY_BARGE] = v } }
     suspend fun setVadMin(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_VADMIN] = v } }
     suspend fun getAutopost(ctx: Context): Int = ctx.ds.data.map { it[KEY_AUTOPOST] ?: 0 }.first()
     suspend fun setAutopost(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_AUTOPOST] = v } }

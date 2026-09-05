@@ -129,6 +129,15 @@ class MainActivity : ComponentActivity() {
                     gesturesEnabled = overlay == null && (tab == 0 || tab == 1),
                     drawerContent = {
                         ModalDrawerSheet {
+                            Row(Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Text("NeuroPocket", fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.weight(1f))
+                                Text(vm.appVersion.ifBlank { "" },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.secondary)
+                            }
                             Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text("Чаты", style = MaterialTheme.typography.titleLarge,
                                     fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -243,6 +252,7 @@ class MainActivity : ComponentActivity() {
                                         onOpenDiag = { hubRoute = "diag" })
                                     else -> ToolsScreen(vm,
                                         onBack = { hubRoute = null },
+                                        onOpenChats = { hubRoute = null; overlay = null; tab = 1 },
                                         initialCard = hubRoute?.substringAfter(":", "") ?: "",
                                         onOpenTool = { openTool(it) })
                                 }
