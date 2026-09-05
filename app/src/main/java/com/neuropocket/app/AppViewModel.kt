@@ -56,6 +56,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var autoUnload by mutableStateOf(true); private set
     var autoBackup by mutableStateOf(false); private set
     var autopostHours by mutableStateOf(0); private set
+    var showTime by mutableStateOf(false); private set
+    var serverTimeout by mutableStateOf(120); private set
     var vadSil by mutableStateOf(42); private set
     var vadMin by mutableStateOf(8000); private set
     var autoFallback by mutableStateOf(true); private set
@@ -113,6 +115,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var speaking by mutableStateOf(false); private set
     var hfRunning by mutableStateOf(false); private set
     var hfStatus by mutableStateOf(""); private set
+    var hfLog by mutableStateOf(listOf<String>()); private set
+    private fun hfSay(s: String) {
+        hfLog = (hfLog + s).takeLast(6)
+    }
     var noteFiles by mutableStateOf(listOf<String>()); private set
     var ragBusy by mutableStateOf(false); private set
     var ragResult by mutableStateOf(""); private set
@@ -146,7 +152,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return if (useNative && llama.loaded()) llama else mock
         }
         val pr = providers.find { it.id == id && it.enabled } ?: return mock
-        return com.neuropocket.app.engine.RemoteEngine(pr, maxTokens, topP)
+        return com.neuropocket.app.engine.RemoteEngine(pr, maxTokens, topP, serverTimeout)
     }
 
     /**
@@ -271,6 +277,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             autoloadChat = Store.getAutoloadChat(ctx); autoloadWhisper = Store.getAutoloadWhisper(ctx)
             autoloadSd = Store.getAutoloadSd(ctx); autoUnload = Store.getAutoUnload(ctx)
             autoBackup = Store.getAutoBackup(ctx)
+            showTime = Store.getShowTime(ctx); serverTimeout = Store.getServerTimeout(ctx)
             autopostHours = Store.getAutopost(ctx)
             vadSil = Store.getVadSil(ctx); vadMin = Store.getVadMin(ctx)
             applyAutopostWork(autopostHours)
@@ -284,6 +291,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             persistProvidersIO(providers)
             providers = providers.map { it.copy(apiKey = KeyVault.get(ctx, it.id) ?: "") }
             activeProviderId = Store.getActiveProvider(ctx)
+            loadAppVersion()
             refreshModelFiles()
             refreshNativeState()
             refreshWhisperState()
@@ -765,7 +773,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         withContext(Dispatchers.Main) { hfStatus = "Не расслышал, повтори." }
                         continue
                     }
-                    withContext(Dispatchers.Main) { hfStatus = "Ты: ${text.take(120)}" }
+                    withContext(Dispatchers.Main) { hfStatus = "Ты: ${text.take(120)}"; hfSay("Ты: " + text.take(120)) }
                     var ans = ""
                     var done = false
                     withContext(Dispatchers.Main) { send(text) { ans = it; done = true } }
@@ -775,7 +783,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (!hfRunning) break
                     if (ans.isBlank() || ans.startsWith("[")) continue
-                    withContext(Dispatchers.Main) { hfStatus = "Отвечаю…" }
+                    withContext(Dispatchers.Main) { hfStatus = "Отвечаю…"; hfSay("ИИ: " + ans.take(120)) }
                     speakSherpa(ans)
                 }
             } catch (e: Exception) {
@@ -841,6 +849,48 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         true
     }
 
+    var storageInfo by mutableStateOf(""); private set
+    var appVersion by mutableStateOf(""); private set
+
+    fun refreshFeed() { viewModelScope.launch(Dispatchers.IO) {
+        val ps = Store.loadPosts(ctx).sortedByDescending { it.ts }
+        val cm = Store.loadComments(ctx).sortedBy { it.ts }
+        withContext(Dispatchers.Main) {
+            posts = ps
+            comments = cm
+            status = "Лента обновлена."
+        }
+    } }
+
+    fun computeStorage() { viewModelScope.launch(Dispatchers.IO) {
+        fun dirSize(f: java.io.File): Long {
+            var s = 0L
+            try {
+                f.walkTopDown().forEach { if (it.isFile) s += it.length() }
+            } catch (_: Exception) { }
+            return s
+        }
+        val m = dirSize(Store.modelsDir(ctx))
+        val c = dirSize(ctx.cacheDir)
+        val gb = { b: Long -> "%.1f ГБ".format(b / 1073741824.0) }
+        withContext(Dispatchers.Main) { storageInfo = "Модели ${gb(m)} • Кэш ${gb(c)}" }
+    } }
+
+    fun clearCache() { viewModelScope.launch(Dispatchers.IO) {
+        try {
+            ctx.cacheDir.listFiles()?.forEach { if (it.name != "chat-export.md") try { it.deleteRecursively() } catch (_: Exception) {} }
+        } catch (_: Exception) { }
+        computeStorage()
+        withContext(Dispatchers.Main) { status = "Кэш очищен." }
+    } }
+
+    fun loadAppVersion() {
+        appVersion = try {
+            val pi = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+            (pi.versionName ?: "?") + " (" + pi.versionCode + ")"
+        } catch (_: Exception) { "" }
+    }
+
     fun refreshGallery() {
         val dir = File(ctx.getExternalFilesDir(null), "pictures").apply { mkdirs() }
         gallery = dir.listFiles()?.filter { it.extension.lowercase() in listOf("png", "jpg") }?.sortedByDescending { it.lastModified() } ?: emptyList()
@@ -872,6 +922,51 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val um = ChatMessage(role = "user", text = userText, personaId = p.id)
         val aid = java.util.UUID.randomUUID().toString()
         messages = messages + um + ChatMessage(id = aid, role = "assistant", text = "", personaId = p.id)
+        launchMainGen(p, userText, aid, onStream)
+    }
+
+    /** Перегенерировать последний ответ (вопрос не дублируется). */
+    fun regenerate() {
+        val p = activePersona ?: return
+        if (deviceBusy() || pBusy) { status = "Дождись конца текущей задачи."; return }
+        val list = messages
+        val li = list.indexOfLast { it.role == "user" }
+        if (li < 0) return
+        stopSpeak()
+        busy = true
+        val aid = java.util.UUID.randomUUID().toString()
+        messages = list.take(li + 1) + ChatMessage(id = aid, role = "assistant", text = "", personaId = p.id)
+        launchMainGen(p, list[li].text, aid) {}
+    }
+
+    /** Перегенерировать ответ в чате персоны. */
+    fun regeneratePersona(persona: Persona) {
+        if (deviceBusy() || pBusy || busy || agentRunning) { status = "Дождись конца текущей задачи."; return }
+        val list = pchats[persona.id] ?: emptyList()
+        val li = list.indexOfLast { it.role == "user" }
+        if (li < 0) return
+        stopSpeak()
+        pBusy = true
+        val aid = java.util.UUID.randomUUID().toString()
+        val base = list.take(li + 1) +
+            ChatMessage(id = aid, role = "assistant", text = "", personaId = persona.id)
+        viewModelScope.launch(Dispatchers.Main) {
+            pchats = pchats + (persona.id to base)
+        }
+        launchPersonaGen(persona, list[li].text, aid, base) {}
+    }
+
+    fun renameSession(id: String, title: String) { viewModelScope.launch(Dispatchers.IO) {
+        val t = title.trim().take(48)
+        if (t.isBlank()) return@launch
+        val ses = Store.loadSessions(ctx).map { if (it.id == id) it.copy(title = t) else it }
+        Store.saveSessions(ctx, ses)
+        withContext(Dispatchers.Main) {
+            sessions = ses.sortedWith(compareByDescending<ChatSession> { it.pinned }.thenByDescending { it.updated })
+        }
+    } }
+
+    private fun launchMainGen(p: Persona, userText: String, aid: String, onStream: (String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             val final = runStream(chatEngineFor(p), p, messages, userText, aid, onUpdate = { snap ->
                 viewModelScope.launch(Dispatchers.Main) {
@@ -989,6 +1084,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             withContext(Dispatchers.Main) {
                 pchats = pchats + (persona.id to list)
             }
+            launchPersonaGen(persona, userText, aid, (pchats[persona.id] ?: emptyList()), onDone)
+        }
+    }
+
+    private fun launchPersonaGen(
+        persona: Persona, userText: String, aid: String,
+        list: List<ChatMessage>, onDone: (String) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
             val final = runStream(chatEngineFor(persona), persona, list, userText, aid, onUpdate = { snap ->
                 viewModelScope.launch(Dispatchers.Main) {
                     val nl = (pchats[persona.id] ?: listOf())
@@ -1000,8 +1104,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val base = withContext(Dispatchers.Main) {
                 (pchats[persona.id] ?: list).map { if (it.id == aid) it.copy(text = final) else it }.takeLast(200)
             }
-            cur[persona.id] = base
-            Store.savePChatMap(ctx, cur)
+            val cmap = Store.loadPChatMap(ctx).toMutableMap()
+            cmap[persona.id] = base
+            Store.savePChatMap(ctx, cmap)
             withContext(Dispatchers.Main) {
                 pchats = pchats + (persona.id to base)
                 pBusy = false
@@ -1388,6 +1493,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun applyAutoloadWhisper(v: Boolean) { viewModelScope.launch { Store.setAutoloadWhisper(ctx, v); autoloadWhisper = v } }
     fun applyAutoloadSd(v: Boolean) { viewModelScope.launch { Store.setAutoloadSd(ctx, v); autoloadSd = v } }
     fun applyAutoUnload(v: Boolean) { viewModelScope.launch { Store.setAutoUnload(ctx, v); autoUnload = v } }
+    fun applyShowTime(v: Boolean) { viewModelScope.launch { Store.setShowTime(ctx, v); showTime = v } }
+    fun applyServerTimeout(v: Int) { viewModelScope.launch { Store.setServerTimeout(ctx, v); serverTimeout = v } }
     fun applyAutoBackup(v: Boolean) {
         viewModelScope.launch {
             Store.setAutoBackup(ctx, v); autoBackup = v

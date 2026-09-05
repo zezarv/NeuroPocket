@@ -41,6 +41,24 @@ fun ProvidersScreen(vm: AppViewModel, onBack: (() -> Unit)? = null) {
                     color = MaterialTheme.colorScheme.secondary)
             }
             item {
+                ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("Таймаут ответа сервера: ${vm.serverTimeout}с",
+                            style = MaterialTheme.typography.titleSmall)
+                        Text("Медленные ПК/модели — ставь больше.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary)
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(30, 60, 120, 300).forEach { s ->
+                                FilterChip(selected = vm.serverTimeout == s,
+                                    onClick = { vm.applyServerTimeout(s) }, label = { Text("${s}с") })
+                            }
+                        }
+                    }
+                }
+            }
+            item {
                 EngineChoiceCard(
                     title = "На телефоне (GGUF)",
                     sub = if (vm.nativeLoaded) "llama.cpp • модель в RAM" else "модель не загружена — будет Mock",

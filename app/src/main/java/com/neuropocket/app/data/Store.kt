@@ -42,6 +42,8 @@ object Store {
     private val KEY_AUTOLOAD_SD = booleanPreferencesKey("autoload_sd")
     private val KEY_AUTOUNLOAD = booleanPreferencesKey("auto_unload")
     private val KEY_AUTOBK = booleanPreferencesKey("auto_backup")
+    private val KEY_SHOWTIME = booleanPreferencesKey("show_time")
+    private val KEY_SRVTO = intPreferencesKey("server_timeout")
     private val KEY_VADSIL = intPreferencesKey("vad_silence")
     private val KEY_VADMIN = intPreferencesKey("vad_min")
     private val KEY_AUTOPOST = intPreferencesKey("autopost_hours")
@@ -162,6 +164,10 @@ object Store {
     suspend fun setAutoloadSd(ctx: Context, v: Boolean) { ctx.ds.edit { it[KEY_AUTOLOAD_SD] = v } }
     suspend fun getAutoUnload(ctx: Context): Boolean = ctx.ds.data.map { it[KEY_AUTOUNLOAD] ?: true }.first()
     suspend fun getAutoBackup(ctx: Context): Boolean = ctx.ds.data.map { it[KEY_AUTOBK] ?: false }.first()
+    suspend fun getShowTime(ctx: Context): Boolean = ctx.ds.data.map { it[KEY_SHOWTIME] ?: false }.first()
+    suspend fun setShowTime(ctx: Context, v: Boolean) { ctx.ds.edit { it[KEY_SHOWTIME] = v } }
+    suspend fun getServerTimeout(ctx: Context): Int = ctx.ds.data.map { it[KEY_SRVTO] ?: 120 }.first()
+    suspend fun setServerTimeout(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_SRVTO] = v } }
     suspend fun getVadSil(ctx: Context): Int = ctx.ds.data.map { it[KEY_VADSIL] ?: 42 }.first()
     suspend fun setVadSil(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_VADSIL] = v } }
     suspend fun getVadMin(ctx: Context): Int = ctx.ds.data.map { it[KEY_VADMIN] ?: 8000 }.first()

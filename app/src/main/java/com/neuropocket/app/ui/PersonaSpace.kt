@@ -179,7 +179,10 @@ fun PersonaChatScreen(vm: AppViewModel, personaId: String, onBack: () -> Unit) {
                 }
             },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, contentDescription = "Назад") } },
-            actions = { IconButton(onClick = { vm.clearPersonaChat(p.id) }) { Icon(Icons.Default.Delete, contentDescription = "Очистить") } }
+            actions = {
+                IconButton(onClick = { vm.regeneratePersona(p) }) { Icon(Icons.Default.Refresh, contentDescription = "Заново") }
+                IconButton(onClick = { vm.clearPersonaChat(p.id) }) { Icon(Icons.Default.Delete, contentDescription = "Очистить") }
+            }
         )
     }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).padding(12.dp)) {
@@ -207,8 +210,16 @@ fun PersonaChatScreen(vm: AppViewModel, personaId: String, onBack: () -> Unit) {
                                     Text("…", color = MaterialTheme.colorScheme.secondary)
                                 } else if (isUser) {
                                     Text(m.text, fontSize = MaterialTheme.typography.bodyLarge.fontSize * vm.textScale)
+                                    if (vm.showTime) {
+                                        Text(timeAgo(m.ts), style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.secondary)
+                                    }
                                 } else {
                                     MarkdownText(m.text, fontSize = MaterialTheme.typography.bodyLarge.fontSize * vm.textScale)
+                                    if (vm.showTime && m.text.isNotBlank()) {
+                                        Text(timeAgo(m.ts), style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.secondary)
+                                    }
                                 }
                                 if (!isUser && m.text.isNotBlank()) {
                                     Row {

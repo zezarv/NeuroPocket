@@ -49,6 +49,7 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
     }
 
     Scaffold(topBar = { TopAppBar(title = { Text("Лента") }, actions = {
+        IconButton(onClick = { vm.refreshFeed() }) { Icon(Icons.Default.Refresh, contentDescription = "Обновить") }
         IconButton(onClick = { vm.clearPosts() }) { Icon(Icons.Default.Delete, contentDescription = "Очистить всё") }
     }) }) { pad ->
         LazyColumn(Modifier.fillMaxSize().padding(pad).padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -589,6 +590,18 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
                             }
                             Switch(checked = vm.keepScreenOn, onCheckedChange = { vm.applyKeepScreenOn(it) })
                         }
+                        Text("Хранилище: " + vm.storageInfo.ifBlank { "не посчитано" },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.secondary)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { vm.computeStorage() }, modifier = Modifier.weight(1f)) {
+                                Text("Посчитать")
+                            }
+                            OutlinedButton(onClick = { vm.clearCache() }, modifier = Modifier.weight(1f)) {
+                                Text("Очистить кэш")
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text("Качать только по Wi-Fi", style = MaterialTheme.typography.bodyMedium)
@@ -688,6 +701,13 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
                     Column(Modifier.padding(14.dp)) {
                         Text("Чат и голос", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Время под сообщениями", style = MaterialTheme.typography.bodyMedium)
+                            }
+                            Switch(checked = vm.showTime, onCheckedChange = { vm.applyShowTime(it) })
+                        }
+                        Spacer(Modifier.height(4.dp))
                         Text("Размер текста: ${"%.0f".format(vm.textScale * 100)}%")
                         Slider(value = vm.textScale, onValueChange = { vm.applyTextScale((it * 20).toInt() / 20f) },
                             valueRange = 0.8f..1.4f, modifier = Modifier.fillMaxWidth())
@@ -704,7 +724,7 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp)) {
                         Text("О приложении", style = MaterialTheme.typography.titleMedium)
-                        Text("NeuroPocket v1.12 • S24 Ultra ready • minSdk 28 • Compose + NDK", style = MaterialTheme.typography.bodySmall)
+                        Text("NeuroPocket ${vm.appVersion} • S24 Ultra ready • minSdk 28 • Compose + NDK", style = MaterialTheme.typography.bodySmall)
                         Text("Движки: llama.cpp + whisper + SD native. Всё хранится только на телефоне.", style = MaterialTheme.typography.bodySmall)
                         Text("Встроенного фильтра нет. 18+-контент — ответственность взрослого пользователя.", style = MaterialTheme.typography.bodySmall)
                         Spacer(Modifier.height(6.dp))

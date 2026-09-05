@@ -14,18 +14,16 @@ import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
-private val http = OkHttpClient.Builder()
-    .connectTimeout(15, TimeUnit.SECONDS)
-    .readTimeout(300, TimeUnit.SECONDS)
-    .writeTimeout(30, TimeUnit.SECONDS)
-    .build()
+
 
 /** OpenAI-совместимый провайдер (LM Studio, Ollama, vLLM, облака) + Pollinations. */
 class RemoteEngine(
     val provider: AiProvider,
     var maxTokens: Int = 512,
-    var topP: Float = 0.9f
+    var topP: Float = 0.9f,
+    var timeoutSec: Int = 120
 ) : AiEngine {
+    private val http: OkHttpClient get() = NetHttp.clientFor(timeoutSec)
     override val engineName: String get() = "${provider.name} (${provider.model.ifBlank { "?" }})"
     override val isLocalReal = false
 
@@ -186,7 +184,7 @@ class RemoteEngine(
                 val base = p.baseUrl.trim().trimEnd('/')
                 val b = Request.Builder().url("$base/models").get()
                 if (p.apiKey.isNotBlank()) b.header("Authorization", "Bearer ${p.apiKey}")
-                http.newCall(b.build()).execute().use { resp ->
+                NetHttp.clientFor(30).newCall(b.build()).execute().use { resp ->
                     if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
                     val arr = JSONObject(resp.body?.string() ?: "").optJSONArray("data") ?: JSONArray()
                     return (0 until arr.length()).map { arr.getJSONObject(it).getString("id") }.sorted()

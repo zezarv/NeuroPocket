@@ -5,6 +5,7 @@ import android.content.Intent
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -35,6 +36,8 @@ fun ChatScreen(
     var voice = remember { VoiceHelper(ctx) }
     var speakOut by remember { mutableStateOf(true) }
     var menuOpen by remember { mutableStateOf(false) }
+    var renameOpen by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf("") }
     var searchOpen by remember { mutableStateOf(false) }
     var searchQ by remember { mutableStateOf("") }
     LaunchedEffect(vm.chatDraft) {
@@ -57,7 +60,15 @@ fun ChatScreen(
 
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text((vm.currentSession()?.title?.take(24) ?: "Чат") + " • " + (vm.activePersona?.name ?: "…")) },
+            title = {
+                Text(
+                    (vm.currentSession()?.title?.take(24) ?: "Чат") + " • " + (vm.activePersona?.name ?: "…"),
+                    modifier = Modifier.clickable {
+                        renameText = vm.currentSession()?.title ?: ""
+                        renameOpen = true
+                    }
+                )
+            },
             navigationIcon = { IconButton(onClick = onMenu) { Icon(Icons.Default.Menu, contentDescription = "История") } },
             actions = {
                 IconButton(onClick = { vm.clearChat() }) { Icon(Icons.Default.Delete, contentDescription = "Очистить") }
@@ -84,6 +95,10 @@ fun ChatScreen(
                                 ctx.startActivity(android.content.Intent.createChooser(sh, "Экспорт чата"))
                             } catch (_: Exception) { }
                         })
+                        DropdownMenuItem(text = { Text("Заново (другой ответ)") }, onClick = {
+                            menuOpen = false
+                            vm.regenerate()
+                        })
                         DropdownMenuItem(text = { Text(if (searchOpen) "Скрыть поиск" else "Найти в чате") }, onClick = {
                             menuOpen = false
                             searchOpen = !searchOpen
@@ -93,6 +108,23 @@ fun ChatScreen(
                 }
             })
     }) { pad ->
+        if (renameOpen) {
+            AlertDialog(
+                onDismissRequest = { renameOpen = false },
+                title = { Text("Переименовать чат") },
+                text = {
+                    OutlinedTextField(renameText, { renameText = it }, label = { Text("Название") },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true)
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        vm.currentSession()?.let { vm.renameSession(it.id, renameText) }
+                        renameOpen = false
+                    }) { Text("Ок") }
+                },
+                dismissButton = { TextButton(onClick = { renameOpen = false }) { Text("Отмена") } }
+            )
+        }
         Column(Modifier.fillMaxSize().padding(pad).padding(12.dp)) {
             Text(vm.engineLabel() + " • " + vm.status, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
             if (searchOpen) {
@@ -127,6 +159,10 @@ fun ChatScreen(
                                     Text("…", color = MaterialTheme.colorScheme.secondary)
                                 } else if (isUser) {
                                     Text(m.text, fontSize = MaterialTheme.typography.bodyLarge.fontSize * vm.textScale)
+                                    if (vm.showTime) {
+                                        Text(timeAgo(m.ts), style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.secondary)
+                                    }
                                 } else {
                                     MarkdownText(m.text, fontSize = MaterialTheme.typography.bodyLarge.fontSize * vm.textScale)
                                 }
@@ -145,6 +181,12 @@ fun ChatScreen(
                                             cm.setPrimaryClip(android.content.ClipData.newPlainText("np", m.text))
                                         }) { Text("Копия") }
                                     }
+                                }
+                                if (vm.showTime && m.text.isNotBlank()) {
+                                    Text(
+                                        timeAgo(m.ts), style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.secondary
+                                    )
                                 }
                             }
                         }
@@ -487,6 +529,10 @@ fun ToolsScreen(
                         if (vm.hfStatus.isNotBlank()) {
                             Text(vm.hfStatus, style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.primary)
+                        }
+                        vm.hfLog.takeLast(4).forEach { ln ->
+                            Text(ln, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.secondary, maxLines = 2)
                         }
                         Spacer(Modifier.height(6.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -854,9 +900,9 @@ fun ToolsScreen(
                             LinearProgressIndicator(Modifier.fillMaxWidth())
                         }
                         Spacer(Modifier.height(6.dp))
-                        Text("Галерея:", style = MaterialTheme.typography.labelMedium)
+                        Text("Галерея (${vm.gallery.size}):", style = MaterialTheme.typography.labelMedium)
                         if (vm.gallery.isEmpty()) Text("Пока пусто.", style = MaterialTheme.typography.bodySmall)
-                        vm.gallery.take(6).forEach { f ->
+                        vm.gallery.forEach { f ->
                             AvatarView(
                                 path = f.absolutePath, emoji = "", size = 320.dp,
                                 modifier = Modifier.fillMaxWidth(),
