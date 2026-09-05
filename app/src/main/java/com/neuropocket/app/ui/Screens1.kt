@@ -437,7 +437,6 @@ fun ToolsScreen(
     var noteName by remember { mutableStateOf("") }
     var noteText by remember { mutableStateOf("") }
     var ragQ by remember { mutableStateOf("") }
-    var lang by remember { mutableStateOf("ru") }
     var recording by remember { mutableStateOf(false) }
     var recTick by remember { mutableIntStateOf(0) }
     val ctx = LocalContext.current
@@ -549,6 +548,12 @@ fun ToolsScreen(
                                 Text("Мин. речь: ${(vm.vadMin / 16000.0)}с", style = MaterialTheme.typography.labelSmall)
                                 Slider(value = vm.vadMin.toFloat(), onValueChange = { vm.applyVadMin(it.toInt()) },
                                     valueRange = 4000f..24000f, steps = 4, modifier = Modifier.fillMaxWidth())
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf("ru", "en", "auto").forEach { v ->
+                                FilterChip(selected = vm.sttLang == v, onClick = { vm.applySttLang(v) },
+                                    label = { Text(v) })
                             }
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -731,17 +736,20 @@ fun ToolsScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("• ${f.name} (${f.length() / 1048576} МБ)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                                 TextButton(onClick = { vm.loadWhisperToRam(f) }) { Text("В RAM") }
+                                TextButton(onClick = { vm.deleteModelFile(f) }) { Text("Удалить") }
                             }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(lang, { lang = it }, label = { Text("Язык (ru/en)") }, modifier = Modifier.weight(1f))
+                            listOf("ru" to "Русский", "en" to "English", "auto" to "Авто").forEach { (v, nm) ->
+                                FilterChip(selected = vm.sttLang == v, onClick = { vm.applySttLang(v) }, label = { Text(nm) })
+                            }
                         }
                         Text("Аудио (WAV 16 кГц моно, до 10 мин):", style = MaterialTheme.typography.labelMedium)
                         if (vm.wavFiles.isEmpty()) Text("Нет аудиофайлов — нажми «Выбрать аудио».", style = MaterialTheme.typography.bodySmall)
                         vm.wavFiles.forEach { f ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("• ${f.name} (${f.length() / 1048576} МБ)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                                TextButton(onClick = { vm.transcribeWav(f, lang) }) { Text("Текст") }
+                                TextButton(onClick = { vm.transcribeWav(f, vm.sttLang) }) { Text("Текст") }
                             }
                         }
                         if (vm.whisperResult.isNotBlank() && !vm.whisperResult.startsWith("__ERR")) {
@@ -859,6 +867,7 @@ fun ToolsScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("• ${f.name} (${f.length() / 1048576} МБ)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                                 TextButton(onClick = { vm.loadSdToRam(f) }) { Text("В RAM") }
+                                TextButton(onClick = { vm.deleteModelFile(f) }) { Text("Удалить") }
                             }
                         }
                         OutlinedTextField(photoPrompt, { photoPrompt = it }, label = { Text("Промпт (лучше на английском)…") },

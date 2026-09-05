@@ -495,6 +495,10 @@ fun RoundTableScreen(vm: AppViewModel, onBack: () -> Unit, onOpenChats: () -> Un
                             Text("Очистить")
                         }
                     }
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = {
+                        vm.startRoundTable(topic.ifBlank { "продолжаем" }, 2, append = true)
+                    }, modifier = Modifier.fillMaxWidth()) { Text("Ещё круг (+2)") }
                     TextButton(onClick = onOpenChats, modifier = Modifier.fillMaxWidth()) {
                         Text("Открыть чаты")
                     }

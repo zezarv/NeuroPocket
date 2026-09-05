@@ -35,6 +35,7 @@ app/src/main/cpp/sherpa-onnx/
 *.onnx
 *.onnx.json
 *.so
+*.zip
 *.wav
 *.mp3
 *.m4a

@@ -8,6 +8,7 @@ import android.os.Environment
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.datastore.dataStoreFile
 import com.neuropocket.app.data.*
 import com.neuropocket.app.engine.LlamaEngine
 import com.neuropocket.app.engine.LlamaNative
@@ -117,6 +118,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var speaking by mutableStateOf(false); private set
     var hfRunning by mutableStateOf(false); private set
     var hfStatus by mutableStateOf(""); private set
+    var sttLang by mutableStateOf("ru"); private set
+    fun applySttLang(v: String) { sttLang = v }
     var hfLog by mutableStateOf(listOf<String>()); private set
     private fun hfSay(s: String) {
         hfLog = (hfLog + s).takeLast(6)
@@ -384,6 +387,125 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     } }
 
     fun voicesDir(): File = File(ctx.getExternalFilesDir(null), "models/voices").apply { mkdirs() }
+    fun voiceEngineDir(): File = File(ctx.getExternalFilesDir(null), "voice_engine").apply { mkdirs() }
+    var voiceEngineState by mutableStateOf(""); private set
+    var voiceEngineUrl by mutableStateOf<String?>(null); private set
+    var voiceEngineBusy by mutableStateOf(false); private set
+
+    /** Правда ли, что sherpa/onnxruntime подгружены (встроены или файлом). */
+    fun ensureVoiceEngine(): Boolean {
+        // 1. встроенный в APK (старые сборки)
+        try {
+            System.loadLibrary("sherpa-onnx-jni")
+            return true
+        } catch (_: Throwable) { }
+        // 2. скачанный файл
+        return tryLoadVoiceEngineFiles()
+    }
+
+    private fun tryLoadVoiceEngineFiles(): Boolean {
+        val dir = voiceEngineDir()
+        val ort = java.io.File(dir, "libonnxruntime.so")
+        val jni = java.io.File(dir, "libsherpa-onnx-jni.so")
+        if (!ort.exists() || !jni.exists()) return false
+        return try {
+            System.load(ort.absolutePath)
+            System.load(jni.absolutePath)
+            true
+        } catch (_: Throwable) { false }
+    }
+
+    fun refreshVoiceEngineState() {
+        voiceEngineState = when {
+            ensureVoiceEngine() -> "ok"
+            voiceEngineFileReady() -> "file"
+            else -> "missing"
+        }
+    }
+
+    private fun voiceEngineFileReady(): Boolean {
+        val dir = voiceEngineDir()
+        return java.io.File(dir, "libonnxruntime.so").exists() &&
+            java.io.File(dir, "libsherpa-onnx-jni.so").exists()
+    }
+
+    suspend fun fetchAssetUrl(name: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val req = okhttp3.Request.Builder()
+                .url("https://api.github.com/repos/zezarv/NeuroPocket/releases/latest")
+                .header("Accept", "application/vnd.github+json").get().build()
+            com.neuropocket.app.engine.NetHttp.client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val arr = org.json.JSONObject(resp.body?.string() ?: "").optJSONArray("assets")
+                    ?: return@withContext null
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    if (o.optString("name") == name) {
+                        return@withContext o.optString("browser_download_url").ifBlank { null }
+                    }
+                }
+                null
+            }
+        } catch (_: Exception) { null }
+    }
+
+    fun resolveVoiceEngineUrl() {
+        if (voiceEngineBusy) return
+        voiceEngineBusy = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val u = fetchAssetUrl("voice-engine-arm64.zip")
+            withContext(Dispatchers.Main) {
+                voiceEngineUrl = u
+                voiceEngineBusy = false
+                if (u == null) status = "Движок не найден в релизах."
+            }
+        }
+    }
+
+    fun downloadVoiceEngine(url: String) {
+        if (url.isBlank()) return
+        try {
+            downloads.values.find { it.fileName == "voice-engine-arm64.zip" && !it.done }?.let { return }
+            val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val req = DownloadManager.Request(Uri.parse(url)).apply {
+                setTitle("voice-engine-arm64.zip")
+                setDescription("NeuroPocket: голосовой движок")
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalFilesDir(ctx, "models", "voice-engine-arm64.zip")
+                setAllowedOverMetered(!wifiOnly); setAllowedOverRoaming(false)
+            }
+            val id = dm.enqueue(req)
+            downloads = downloads + (id to DlInfo("voice-engine-arm64.zip", "В очереди…", 0f, false, false))
+            status = "Качаю голосовой движок…"
+            startDlPoll()
+        } catch (e: Exception) { status = "Ошибка загрузки: ${e.message}" }
+    }
+
+    fun extractVoiceEngine() { viewModelScope.launch(Dispatchers.IO) {
+        withContext(Dispatchers.Main) { status = "Распаковываю движок…" }
+        try {
+            val zip = java.io.File(Store.modelsDir(ctx), "voice-engine-arm64.zip")
+            val dir = voiceEngineDir()
+            org.apache.commons.compress.archivers.zip.ZipFile(zip).use { zf ->
+                val it = zf.entries
+                while (it.hasMoreElements()) {
+                    val e = it.nextElement()
+                    if (e.isDirectory) continue
+                    val name = java.io.File(e.name).name
+                    if (name != "libonnxruntime.so" && name != "libsherpa-onnx-jni.so") continue
+                    val out = java.io.File(dir, name)
+                    zf.getInputStream(e).use { ins -> out.outputStream().use { ins.copyTo(it) } }
+                }
+            }
+            val ok = voiceEngineFileReady()
+            withContext(Dispatchers.Main) {
+                refreshVoiceEngineState()
+                status = if (ok) "Голосовой движок готов." else "Не вышло распаковать."
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) { status = "Ошибка распаковки: ${e.message?.take(120)}" }
+        }
+    } }
     fun notesDir(): File = File(ctx.getExternalFilesDir(null), "notes").apply { mkdirs() }
     private fun ragIndexFile(): File = File(notesDir(), ".index.json")
 
@@ -453,6 +575,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     } }
 
     fun loadVoice(dirName: String) { viewModelScope.launch(Dispatchers.IO) {
+        if (!ensureVoiceEngine()) {
+            withContext(Dispatchers.Main) { status = "Нет голосового движка: скачай его ниже." }
+            return@launch
+        }
         withContext(Dispatchers.Main) { status = "Загружаю голос $dirName…" }
         loadVoiceSync(dirName)
         withContext(Dispatchers.Main) {
@@ -490,7 +616,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     sherpa = com.neuropocket.app.voice.SherpaTts(found.first, found.second, found.third, threadsEffective())
                     activeVoice = dirName
                     ttsInfo = "голос: $dirName"
-                } catch (_: Exception) { ttsInfo = "голос: ошибка" }
+                } catch (_: Throwable) { ttsInfo = "голос: ошибка" }
             } else {
                 ttsInfo = "голос: нет"
             }
@@ -515,17 +641,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         stopGen()
     }
 
-    fun startRoundTable(topic: String, rounds: Int) {
+    fun startRoundTable(topic: String, rounds: Int, append: Boolean = false) {
         val parts = personas.filter { it.id in rtSelected }.take(4)
         if (topic.isBlank() || parts.size < 2 || rtRunning || deviceBusy() || pBusy) return
+        if (!append) rtTurns = emptyList()
         stopSpeak()
         rtRunning = true
         rtCancel = false
         rtTurns = emptyList()
         status = "Круглый стол идёт…"
+        val seedAcc = rtTurns.joinToString("\n") { it.name + ": " + it.text }.take(2000)
         viewModelScope.launch(Dispatchers.IO) {
             llama.maxTokens = 160; llama.topP = topP; llama.topK = topK
-            val acc = StringBuilder()
+            val acc = StringBuilder(seedAcc)
             outer@ for (r in 1..rounds.coerceIn(1, 5)) {
                 for (per in parts) {
                     if (rtCancel) break@outer
@@ -752,6 +880,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (sherpa == null) { status = "Сначала голос в RAM (Модели → Голоса)."; return }
         val vadF = vadFile()
         if (!vadF.exists()) { status = "Скачай VAD Silero в каталоге голосов."; return }
+        if (!ensureVoiceEngine()) { status = "Нет голосового движка: скачай его в Моделях."; return }
         hfRunning = true
         viewModelScope.launch(Dispatchers.IO) {
             var vad: com.k2fsa.sherpa.onnx.Vad? = null
@@ -782,7 +911,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     val tmp = File(ctx.cacheDir, "hf-${System.currentTimeMillis()}.wav")
                     com.neuropocket.app.voice.WavUtils.writeMono16k(tmp, turn)
                     val text = try {
-                        WhisperNative.transcribe(tmp.absolutePath, "ru", threadsEffective())
+                        WhisperNative.transcribe(tmp.absolutePath, sttLang, threadsEffective())
                     } catch (_: Exception) { "" }
                     try { tmp.delete() } catch (_: Exception) {}
                     if (text.isBlank() || text.startsWith("__ERR")) {
@@ -802,8 +931,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     withContext(Dispatchers.Main) { hfStatus = "Отвечаю…"; hfSay("ИИ: " + ans.take(120)) }
                     speakSherpa(ans)
                 }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) { hfStatus = "Ошибка: ${e.message?.take(120)}" }
+            } catch (_: Throwable) {
+                withContext(Dispatchers.Main) { hfStatus = "Ошибка голосового чата." }
             }
             try { rec?.stop(); rec?.release() } catch (_: Exception) {}
             try { vad?.release() } catch (_: Exception) {}
@@ -859,7 +988,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         try {
             for (s in com.neuropocket.app.voice.splitSentences(text)) {
                 if (speakStop) break
-                val audio = try { eng.synth(s, ttsRate) } catch (_: Exception) { break }
+                val audio = try { eng.synth(s, ttsRate) } catch (_: Throwable) { break }
                 player.play(audio)
             }
         } catch (_: Exception) { }
@@ -872,6 +1001,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private fun startBargeMonitor(): kotlinx.coroutines.Job? {
         val vadF = try { vadFile() } catch (_: Exception) { return null }
         if (!vadF.exists()) return null
+        if (!ensureVoiceEngine()) return null
         return viewModelScope.launch(Dispatchers.IO) {
             var vad: com.k2fsa.sherpa.onnx.Vad? = null
             var rec: android.media.AudioRecord? = null
@@ -918,7 +1048,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (!speech) hits = 0
                 }
-            } catch (_: Exception) { }
+            } catch (_: Throwable) { }
             try { rec?.stop(); rec?.release() } catch (_: Exception) { }
         }
     }
@@ -1467,6 +1597,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun updatePost(id: String, text: String) { viewModelScope.launch(Dispatchers.IO) {
+        val t = text.trim().take(500)
+        if (t.isBlank()) return@launch
+        val all = Store.loadPosts(ctx).map { if (it.id == id) it.copy(text = t) else it }
+        Store.savePosts(ctx, all)
+        withContext(Dispatchers.Main) { posts = all.sortedByDescending { it.ts } }
+    } }
+
     fun deletePost(id: String) { viewModelScope.launch(Dispatchers.IO) {
         val all = Store.loadPosts(ctx).filterNot { it.id == id }
         Store.savePosts(ctx, all)
@@ -1713,6 +1851,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             if (fn == "NeuroPocket-update.apk") {
                                 status = "Обновление скачано."
                                 promptInstallUpdate()
+                            }
+                            if (fn == "voice-engine-arm64.zip") {
+                                extractVoiceEngine()
                             }
                         }
                         scanModels()
@@ -2370,6 +2511,65 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun scanModels() { refreshModelFiles(); refreshGallery(); status = if (modelFiles.isEmpty()) "GGUF не найдены. Скачай из каталога." else "Найдено моделей: ${modelFiles.size}" }
+
+    /** Удалить файл модели/голоса с диска. */
+    fun deleteModelFile(f: java.io.File) {
+        if (deviceBusy()) { status = "Дождись конца текущей задачи."; return }
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = f.name
+            try {
+                if (f.isDirectory) f.deleteRecursively() else f.delete()
+            } catch (_: Exception) { }
+            // если удалили загруженное — выгрузить и сбросить состояние
+            if (name.endsWith(".gguf") && nativeLoaded) {
+                try { llama.unload() } catch (_: Exception) { }
+            }
+            if (name.endsWith(".bin") && whisperLoaded) {
+                try { WhisperNative.unload() } catch (_: Exception) { }
+            }
+            if ((name.endsWith(".safetensors") || name.endsWith(".ckpt")) && sdLoaded) {
+                try { com.neuropocket.app.engine.SdNative.unload() } catch (_: Exception) { }
+            }
+            if (activeVoice != null && f.absolutePath.contains("voices")) {
+                try { sherpa?.release() } catch (_: Exception) { }
+                sherpa = null
+            }
+            refreshModelFiles()
+            refreshNativeState(); refreshWhisperState(); refreshSdState(); refreshVisionState(); refreshEmbedState()
+            withContext(Dispatchers.Main) { status = "Удалено: $name" }
+        }
+    }
+
+    private var resetArmed = false
+
+    /** Сброс всех данных (двухшаговый). Модели на диске не трогает. */
+    fun factoryReset() { viewModelScope.launch(Dispatchers.IO) {
+        if (!resetArmed) {
+            withContext(Dispatchers.Main) {
+                resetArmed = true
+                status = "Точно сбросить ВСЁ? Нажми ещё раз."
+            }
+            kotlinx.coroutines.delay(6000)
+            resetArmed = false
+            return@launch
+        }
+        resetArmed = false
+        try {
+            try { llama.unload() } catch (_: Exception) { }
+            try { WhisperNative.unload() } catch (_: Exception) { }
+            try { com.neuropocket.app.engine.SdNative.unload() } catch (_: Exception) { }
+            try { sherpa?.release() } catch (_: Exception) { }
+            sherpa = null
+            ctx.getSharedPreferences("np_secret_keys", 0).edit().clear().apply()
+            // чистим DataStore целиком
+            ctx.dataStoreFile("neuro_pocket.preferences_pb")?.let { dsf ->
+                try { dsf.delete() } catch (_: Exception) { }
+            }
+            try { ragIndexFile().delete() } catch (_: Exception) { }
+        } catch (_: Exception) { }
+        reload()
+        withContext(Dispatchers.Main) { status = "Всё сброшено. Как новое." }
+    } }
 
     var backupMsg by mutableStateOf(""); private set
     var sdEngineState by mutableStateOf(""); private set // builtin | file | missing | error

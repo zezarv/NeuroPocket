@@ -26,6 +26,8 @@ import java.io.File
 fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
     var composer by remember { mutableStateOf("") }
     var feedFind by remember { mutableStateOf("") }
+    var editId by remember { mutableStateOf<String?>(null) }
+    var editText by remember { mutableStateOf("") }
     var tagFilter by remember { mutableStateOf("Все") }
     var authorMenu by remember { mutableStateOf(false) }
     var authorId by remember { mutableStateOf(vm.personas.firstOrNull()?.id ?: "") }
@@ -158,6 +160,7 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                             TextButton(onClick = {
                                 if (author != null) vm.addPost(author.id, p.text)
                             }) { Text("Репост") }
+                            TextButton(onClick = { editId = p.id; editText = p.text }) { Text("Правка") }
                             TextButton(onClick = { vm.deletePost(p.id) }) { Text("Удалить") }
                         }
                         if (vm.commentsOpen == p.id) {
@@ -204,6 +207,25 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                             TextButton(onClick = {
                                 if (author != null) vm.aiComment(p.id, author.id)
                             }) { Text("ИИ-ответ от автора") }
+                        }
+                    }
+                }
+            }
+            if (editId != null) {
+                item {
+                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text("Правка поста", style = MaterialTheme.typography.titleSmall)
+                            OutlinedTextField(editText, { editText = it },
+                                modifier = Modifier.fillMaxWidth(), minLines = 3)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = {
+                                    editId?.let { vm.updatePost(it, editText) }
+                                    editId = null
+                                }, modifier = Modifier.weight(1f)) { Text("Сохранить") }
+                                OutlinedButton(onClick = { editId = null },
+                                    modifier = Modifier.weight(1f)) { Text("Отмена") }
+                            }
                         }
                     }
                 }
@@ -346,6 +368,8 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(onClick = { vm.loadFileToRam(f) }) { Text("В RAM") }
                                 OutlinedButton(onClick = { vm.loadFileToRam(f, 1024) }) { Text("RAM 1k") }
+                                Spacer(Modifier.weight(1f))
+                                TextButton(onClick = { vm.deleteModelFile(f) }) { Text("Удалить") }
                             }
                             Text("По умолч. ctx ${vm.ctxSize}, потоки ${if (vm.threads == 0) "авто" else "${vm.threads}"} — меняется в настройках.",
                                 style = MaterialTheme.typography.labelSmall)
@@ -398,6 +422,30 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
                         Text("Голоса (sherpa/piper, офлайн)", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Движок: " + when (vm.voiceEngineState) {
+                                "ok" -> "готов"
+                                "file" -> "файл есть"
+                                else -> "нужно скачать (~25 МБ)"
+                            } + " • " + vm.ttsInfo,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        if (vm.voiceEngineState == "missing") {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (vm.voiceEngineUrl == null) {
+                                    OutlinedButton(onClick = { vm.resolveVoiceEngineUrl() },
+                                        enabled = !vm.voiceEngineBusy, modifier = Modifier.weight(1f)) {
+                                        Text(if (vm.voiceEngineBusy) "Ищу…" else "Найти движок")
+                                    }
+                                } else {
+                                    Button(onClick = {
+                                        vm.voiceEngineUrl?.let { vm.downloadVoiceEngine(it) }
+                                    }, modifier = Modifier.weight(1f)) { Text("Скачать (25 МБ)") }
+                                }
+                            }
+                            DlRow(vm, "voice-engine-arm64.zip")
+                            Spacer(Modifier.height(4.dp))
+                        }
                         Text(vm.ttsInfo, style = MaterialTheme.typography.bodySmall)
                         Spacer(Modifier.height(6.dp))
                         if (vm.voiceDirs.isEmpty()) {
@@ -407,6 +455,9 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("• $v", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                                 TextButton(onClick = { vm.loadVoice(v) }) { Text("В RAM") }
+                                TextButton(onClick = {
+                                    vm.deleteModelFile(java.io.File(vm.voicesDir(), v))
+                                }) { Text("Удалить") }
                             }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -760,6 +811,13 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
                                 Text(if (vm.autoFallback) "Запасной вкл" else "Запасной выкл")
                             }
                         }
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedButton(onClick = { vm.factoryReset() }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Сбросить всё (два нажатия)", color = MaterialTheme.colorScheme.error)
+                        }
+                        Text("Сброс чистит чаты/персон/настройки. Модели на диске не трогает.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.secondary)
                     }
                 }
             }
