@@ -439,6 +439,8 @@ fun ToolsScreen(
     var ragQ by remember { mutableStateOf("") }
     var recording by remember { mutableStateOf(false) }
     var recTick by remember { mutableIntStateOf(0) }
+    // P0.6: подтверждение удаления крупных файлов.
+    var confirmDelete by remember { mutableStateOf<java.io.File?>(null) }
     val ctx = LocalContext.current
     var rec by remember { mutableStateOf<com.neuropocket.app.voice.AudioRec?>(null) }
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -736,7 +738,7 @@ fun ToolsScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("• ${f.name} (${f.length() / 1048576} МБ)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                                 TextButton(onClick = { vm.loadWhisperToRam(f) }) { Text("В RAM") }
-                                TextButton(onClick = { vm.deleteModelFile(f) }) { Text("Удалить") }
+                                TextButton(onClick = { confirmDelete = f }) { Text("Удалить") }
                             }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -867,7 +869,7 @@ fun ToolsScreen(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("• ${f.name} (${f.length() / 1048576} МБ)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                                 TextButton(onClick = { vm.loadSdToRam(f) }) { Text("В RAM") }
-                                TextButton(onClick = { vm.deleteModelFile(f) }) { Text("Удалить") }
+                                TextButton(onClick = { confirmDelete = f }) { Text("Удалить") }
                             }
                         }
                         OutlinedTextField(photoPrompt, { photoPrompt = it }, label = { Text("Промпт (лучше на английском)…") },
@@ -1007,5 +1009,23 @@ fun ToolsScreen(
                 }
             }
         }
+    }
+    confirmDelete?.let { f ->
+        val role = com.neuropocket.app.core.ModelRoles.classify(f.name)
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Удалить файл?") },
+            text = {
+                Text(
+                    "Имя: ${f.name}\n" +
+                        "Размер: ${try { f.length() / 1048576 } catch (_: Exception) { -1 }} МБ\n" +
+                        "Тип: ${com.neuropocket.app.core.ModelRoles.labelRu(role)}"
+                )
+            },
+            confirmButton = {
+                Button(onClick = { vm.deleteModelFile(f); confirmDelete = null }) { Text("Удалить") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Отмена") } }
+        )
     }
 }

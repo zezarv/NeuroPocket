@@ -40,6 +40,11 @@ object KeyVault {
     fun remove(ctx: Context, id: String) { try {
         prefs(ctx).edit().remove("k_$id").apply()
     } catch (_: Exception) {} }
+
+    /** P0.5: корректная очистка всех ключей (через EncryptedSharedPreferences). */
+    fun clear(ctx: Context) { try {
+        prefs(ctx).edit().clear().apply()
+    } catch (_: Exception) {} }
 }
 
 /**
@@ -72,9 +77,10 @@ object Backup {
         data.put("posts", posts)
         data.put("comments", comments)
         data.put("providers", providers)
-        val st = JSONObject()
-        settings.forEach { (k, v) -> st.put(k, v) }
-        data.put("settings", st.toString())
+        // P0.4: новый корректный формат — settings как JSONObject (не String).
+        // Старые бэкапы со String(JSON) читаем в parse() для backward compat.
+        val st = com.neuropocket.app.core.BackupSettings.encode(settings)
+        data.put("settings", st)
         root.put("data", data)
         if (withKeys && password.length >= 4) {
             val keys = JSONObject()
@@ -141,9 +147,7 @@ object Backup {
             val jo = JSONObject(String(plain, Charsets.UTF_8))
             for (k in jo.keys()) keys[k] = jo.getString(k)
         }
-        val st = mutableMapOf<String, String>()
-        val so = data.optJSONObject("settings")?.let { JSONObject(it.optString("", "{}")) } ?: JSONObject()
-        for (k in so.keys()) st[k] = so.getString(k)
+        val st: Map<String, String> = com.neuropocket.app.core.BackupSettings.decode(data)
         return Parsed(
             data.optString("personas", "[]"), data.optString("sessions", "[]"),
             data.optString("msgmap", "{}"), data.optString("chars", "[]"),

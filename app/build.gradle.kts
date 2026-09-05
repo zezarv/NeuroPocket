@@ -16,8 +16,8 @@ android {
         applicationId = "com.neuropocket.app"
         minSdk = 28
         targetSdk = 34
-        versionCode = 26
-        versionName = "1.24.0-plan5"
+        versionCode = 27
+        versionName = "1.25.0-rc.1"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -37,16 +37,39 @@ android {
 
     signingConfigs {
         create("release") {
-            // Пароли: keystore.properties (рядом с корнем, НЕ в git) -> env -> дефолт локальной сборки.
-            // Сам release.keystore тоже никогда не коммитится.
+            // P0.9: FAIL CLOSED — никаких fallback-паролей в репозитории.
+            // Release требует реальный keystore: keystore.properties или env.
+            // Debug/unit-тесты работают без него; ошибка — только при сборке release.
             val kp = Properties()
             rootProject.file("keystore.properties").takeIf { it.exists() }?.inputStream()?.use { kp.load(it) }
-            fun prop(name: String, env: String, def: String): String =
-                kp.getProperty(name) ?: System.getenv(env) ?: def
-            storeFile = file(prop("storeFile", "NP_STORE_FILE", "../release.keystore"))
-            storePassword = prop("storePassword", "NP_STORE_PASS", "neuropocket123")
-            keyAlias = prop("keyAlias", "NP_KEY_ALIAS", "neuropocket")
-            keyPassword = prop("keyPassword", "NP_KEY_PASS", "neuropocket123")
+            val wantsRelease = gradle.startParameter.taskNames.any {
+                it.contains("Release", ignoreCase = true)
+            }
+            fun req(name: String, env: String): String? {
+                val v = kp.getProperty(name) ?: System.getenv(env)
+                if (v == null && wantsRelease) throw GradleException(
+                    "Release signing not configured: missing $name " +
+                        "(keystore.properties or env $env). " +
+                        "Debug build works without it; release FAILS CLOSED (P0.9)."
+                )
+                return v
+            }
+            val sf = req("storeFile", "NP_STORE_FILE")
+            val sp = req("storePassword", "NP_STORE_PASS")
+            val ka = req("keyAlias", "NP_KEY_ALIAS")
+            val kpw = req("keyPassword", "NP_KEY_PASS")
+            if (sf != null && sp != null && ka != null && kpw != null) {
+                storeFile = file(sf)
+                storePassword = sp
+                keyAlias = ka
+                keyPassword = kpw
+                if (wantsRelease && !storeFile!!.exists()) throw GradleException(
+                    "Release keystore file not found: ${storeFile}. " +
+                        "Create it per docs/BUILD.md (never commit it)."
+                )
+            } else if (wantsRelease) {
+                throw GradleException("Release signing incomplete (P0.9 fail-closed).")
+            }
         }
     }
 
@@ -73,6 +96,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     externalNativeBuild {
         cmake {
@@ -123,4 +147,7 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

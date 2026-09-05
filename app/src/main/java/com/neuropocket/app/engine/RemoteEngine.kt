@@ -38,6 +38,10 @@ class RemoteEngine(
         if (base.isEmpty() || provider.model.isBlank()) {
             return@withContext "[Провайдер ${provider.name}: не заполнены URL или модель. Открой Провайдеры.]"
         }
+        // P0.10: http только для LAN, публичные — только https.
+        if (!com.neuropocket.app.core.NetworkPolicy.isUrlAllowed(base)) {
+            return@withContext "[${provider.name}: ${com.neuropocket.app.core.NetworkPolicy.blockedReason(base)}]"
+        }
         // сначала стрим, при неудаче — обычный запрос
         try {
             streamChat(base, history, persona, userText, onToken)
@@ -180,6 +184,10 @@ class RemoteEngine(
         /** Список моделей сервера. Бросает исключение с понятным текстом. */
         fun fetchModels(p: AiProvider): List<String> {
             if (p.kind == "pollinations") return listOf("openai")
+            // P0.10: тот же guard, что и в generate.
+            if (!com.neuropocket.app.core.NetworkPolicy.isUrlAllowed(p.baseUrl.trim().trimEnd('/'))) {
+                throw Exception(com.neuropocket.app.core.NetworkPolicy.blockedReason(p.baseUrl))
+            }
             try {
                 val base = p.baseUrl.trim().trimEnd('/')
                 val b = Request.Builder().url("$base/models").get()

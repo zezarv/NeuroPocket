@@ -54,6 +54,7 @@ object Store {
     private val KEY_ACTIVE_PROV = stringPreferencesKey("active_provider_id") // local | mock | providerId
     private val KEY_TOOLMAP = stringPreferencesKey("toolmap_json") // toolId -> runs
     private val KEY_PCHATMAP = stringPreferencesKey("pchatmap_json") // personaId -> messages
+    private val KEY_STT_LANG = stringPreferencesKey("stt_lang") // ru | en | auto (P0.3 persisted)
 
     fun defaultPersonas() = listOf(
         Persona(name = "Ассистент", systemPrompt = "Ты полезный локальный ассистент. Отвечай кратко и по-русски.", avatarEmoji = "\uD83E\uDD16",
@@ -225,6 +226,18 @@ object Store {
     suspend fun savePChatMap(ctx: Context, v: Map<String, List<ChatMessage>>) {
         val cut = v.mapValues { it.value.takeLast(200) }.toList().takeLast(40).toMap()
         ctx.ds.edit { it[KEY_PCHATMAP] = json.encodeToString(cut) }
+    }
+
+    /** P0.3: persisted STT language (ru|en|auto), default ru. */
+    suspend fun getSttLang(ctx: Context): String =
+        com.neuropocket.app.core.SttLang.normalize(ctx.ds.data.map { it[KEY_STT_LANG] }.first())
+    suspend fun setSttLang(ctx: Context, v: String) {
+        ctx.ds.edit { it[KEY_STT_LANG] = com.neuropocket.app.core.SttLang.normalize(v) }
+    }
+
+    /** P0.5: корректный сброс DataStore (не удалять backing file напрямую). */
+    suspend fun clearAll(ctx: Context) {
+        ctx.ds.edit { it.clear() }
     }
 
     fun modelsDir(ctx: Context): File = File(ctx.getExternalFilesDir(null), "models").apply { mkdirs() }

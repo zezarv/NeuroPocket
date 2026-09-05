@@ -283,6 +283,8 @@ private fun HashtagText(text: String, active: String, onTag: (String) -> Unit) {
 @Composable
 fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
     val ctx = LocalContext.current
+    // P0.6: подтверждение удаления крупных файлов (имя/размер/тип).
+    var confirmDelete by remember { mutableStateOf<File?>(null) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         val f = ctx.copyUriToModels(uri, "imported")
@@ -364,12 +366,16 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                 vm.modelFiles.forEach { f ->
                     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(10.dp)) {
+                            val role = remember(f.name) { com.neuropocket.app.core.ModelRoles.classify(f.name) }
                             Text("• ${f.name} (${f.length() / 1048576} МБ)", style = MaterialTheme.typography.bodySmall)
+                            Text(com.neuropocket.app.core.ModelRoles.labelRu(role),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(onClick = { vm.loadFileToRam(f) }) { Text("В RAM") }
                                 OutlinedButton(onClick = { vm.loadFileToRam(f, 1024) }) { Text("RAM 1k") }
                                 Spacer(Modifier.weight(1f))
-                                TextButton(onClick = { vm.deleteModelFile(f) }) { Text("Удалить") }
+                                TextButton(onClick = { confirmDelete = f }) { Text("Удалить") }
                             }
                             Text("По умолч. ctx ${vm.ctxSize}, потоки ${if (vm.threads == 0) "авто" else "${vm.threads}"} — меняется в настройках.",
                                 style = MaterialTheme.typography.labelSmall)
@@ -426,7 +432,7 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                             "Движок: " + when (vm.voiceEngineState) {
                                 "ok" -> "готов"
                                 "file" -> "файл есть"
-                                else -> "нужно скачать (~25 МБ)"
+                                else -> "нужно скачать (~10 МБ)"
                             } + " • " + vm.ttsInfo,
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -440,7 +446,7 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                                 } else {
                                     Button(onClick = {
                                         vm.voiceEngineUrl?.let { vm.downloadVoiceEngine(it) }
-                                    }, modifier = Modifier.weight(1f)) { Text("Скачать (25 МБ)") }
+                                    }, modifier = Modifier.weight(1f)) { Text("Скачать (~10 МБ)") }
                                 }
                             }
                             DlRow(vm, "voice-engine-arm64.zip")
@@ -456,7 +462,7 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                                 Text("• $v", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                                 TextButton(onClick = { vm.loadVoice(v) }) { Text("В RAM") }
                                 TextButton(onClick = {
-                                    vm.deleteModelFile(java.io.File(vm.voicesDir(), v))
+                                    confirmDelete = java.io.File(vm.voicesDir(), v)
                                 }) { Text("Удалить") }
                             }
                         }
@@ -574,6 +580,34 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
             }
         }
     }
+    // P0.6: подтверждение удаления с именем/размером/типом.
+    confirmDelete?.let { f ->
+        val role = com.neuropocket.app.core.ModelRoles.classify(f.name)
+        val sizeMb = try { f.length() / 1048576 } catch (_: Exception) { -1 }
+        val loadedMark = when {
+            vm.loadedTextPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
+            vm.loadedWhisperPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
+            vm.loadedSdPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
+            vm.loadedVisionPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
+            vm.loadedEmbedPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
+            else -> ""
+        }
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text("Удалить файл?") },
+            text = {
+                Text(
+                    "Имя: ${f.name}\n" +
+                        "Размер: ${if (sizeMb >= 0) "$sizeMb МБ" else "?"} \n" +
+                        "Тип: ${com.neuropocket.app.core.ModelRoles.labelRu(role)}$loadedMark"
+                )
+            },
+            confirmButton = {
+                Button(onClick = { vm.deleteModelFile(f); confirmDelete = null }) { Text("Удалить") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Отмена") } }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -582,6 +616,8 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
     var query by remember { mutableStateOf("") }
     var bkKeys by remember { mutableStateOf(false) }
     var bkPass by remember { mutableStateOf("") }
+    // P0.5: нормальный confirmation dialog вместо ambiguous two-tap.
+    var showReset by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
     val restorePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) vm.restoreBackup(uri, bkPass)
@@ -778,7 +814,7 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(14.dp)) {
                         Text("О приложении", style = MaterialTheme.typography.titleMedium)
-                        Text("NeuroPocket ${vm.appVersion} • S24 Ultra ready • minSdk 28 • Compose + NDK", style = MaterialTheme.typography.bodySmall)
+                        Text("NeuroPocket ${vm.appVersion} • S24 Ultra ready • Android 9+ (minSdk 28) • Compose + NDK", style = MaterialTheme.typography.bodySmall)
                         Text("Движки: llama.cpp + whisper + SD native. Всё хранится только на телефоне.", style = MaterialTheme.typography.bodySmall)
                         Text("Встроенного фильтра нет. 18+-контент — ответственность взрослого пользователя.", style = MaterialTheme.typography.bodySmall)
                         Spacer(Modifier.height(6.dp))
@@ -812,16 +848,36 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
                             }
                         }
                         Spacer(Modifier.height(6.dp))
-                        OutlinedButton(onClick = { vm.factoryReset() }, modifier = Modifier.fillMaxWidth()) {
-                            Text("Сбросить всё (два нажатия)", color = MaterialTheme.colorScheme.error)
+                        OutlinedButton(onClick = { showReset = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("Сбросить настройки и чаты…", color = MaterialTheme.colorScheme.error)
                         }
-                        Text("Сброс чистит чаты/персон/настройки. Модели на диске не трогает.",
+                        Text("Сброс чистит чаты/персон/ленту/настройки. Модели, заметки, картинки, голоса и аватары на диске сохраняются.",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.secondary)
                     }
                 }
             }
         }
+    }
+    if (showReset) {
+        AlertDialog(
+            onDismissRequest = { showReset = false },
+            title = { Text("Сбросить данные?") },
+            text = {
+                Text(
+                    "Будут удалены: чаты, персоны, лента, настройки, ключи API, индекс заметок.\n\n" +
+                        "Сохранятся на диске: скачанные модели, голоса, заметки (.md), картинки, аватары.\n\n" +
+                        "Действие необратимо. Продолжить?"
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showReset = false
+                    vm.factoryResetConfirmed()
+                }) { Text("Сбросить") }
+            },
+            dismissButton = { TextButton(onClick = { showReset = false }) { Text("Отмена") } }
+        )
     }
 }
 

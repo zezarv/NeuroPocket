@@ -8,7 +8,6 @@ import android.os.Environment
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.datastore.dataStoreFile
 import com.neuropocket.app.data.*
 import com.neuropocket.app.engine.LlamaEngine
 import com.neuropocket.app.engine.LlamaNative
@@ -119,7 +118,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var hfRunning by mutableStateOf(false); private set
     var hfStatus by mutableStateOf(""); private set
     var sttLang by mutableStateOf("ru"); private set
-    fun applySttLang(v: String) { sttLang = v }
+    fun applySttLang(v: String) {
+        val n = com.neuropocket.app.core.SttLang.normalize(v)
+        sttLang = n
+        viewModelScope.launch(Dispatchers.IO) { Store.setSttLang(ctx, n) }
+    }
     var hfLog by mutableStateOf(listOf<String>()); private set
     private fun hfSay(s: String) {
         hfLog = (hfLog + s).takeLast(6)
@@ -297,6 +300,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             persistProvidersIO(providers)
             providers = providers.map { it.copy(apiKey = KeyVault.get(ctx, it.id) ?: "") }
             activeProviderId = Store.getActiveProvider(ctx)
+            sttLang = Store.getSttLang(ctx)
             loadAppVersion()
             refreshModelFiles()
             refreshNativeState()
@@ -304,6 +308,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             refreshSdState()
             refreshVisionState()
             refreshEmbedState()
+            // P0.2: lifecycle на чистом старте — однозначно MISSING/READY, не "".
+            try { refreshVoiceEngineState() } catch (_: Exception) { voiceEngineState = "missing" }
         }
     }
 
@@ -388,7 +394,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun voicesDir(): File = File(ctx.getExternalFilesDir(null), "models/voices").apply { mkdirs() }
     fun voiceEngineDir(): File = File(ctx.getExternalFilesDir(null), "voice_engine").apply { mkdirs() }
-    var voiceEngineState by mutableStateOf(""); private set
+    // P0.2: однозначное начальное состояние, refresh при reload (см. reload()).
+    var voiceEngineState by mutableStateOf("missing"); private set
     var voiceEngineUrl by mutableStateOf<String?>(null); private set
     var voiceEngineBusy by mutableStateOf(false); private set
 
@@ -482,28 +489,64 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun extractVoiceEngine() { viewModelScope.launch(Dispatchers.IO) {
-        withContext(Dispatchers.Main) { status = "Распаковываю движок…" }
+        withContext(Dispatchers.Main) {
+            voiceEngineState = "installing"
+            status = "Распаковываю движок…"
+        }
+        // P0.7: whitelist + zip-slip + atomic temp dir + cleanup. System.load только после проверки.
+        val allowed = setOf("libonnxruntime.so", "libsherpa-onnx-jni.so")
+        var tmpDir: java.io.File? = null
         try {
             val zip = java.io.File(Store.modelsDir(ctx), "voice-engine-arm64.zip")
+            require(zip.exists() && zip.length() > 1024 * 1024) { "zip не найден или слишком мал" }
             val dir = voiceEngineDir()
+            tmpDir = java.io.File(dir.parent, "voice_engine.tmp-${System.currentTimeMillis()}")
+            tmpDir.mkdirs()
             org.apache.commons.compress.archivers.zip.ZipFile(zip).use { zf ->
                 val it = zf.entries
                 while (it.hasMoreElements()) {
                     val e = it.nextElement()
                     if (e.isDirectory) continue
+                    // zip-slip: берём только basename из whitelist, отбрасываем пути
                     val name = java.io.File(e.name).name
-                    if (name != "libonnxruntime.so" && name != "libsherpa-onnx-jni.so") continue
-                    val out = java.io.File(dir, name)
+                    if (name !in allowed) continue
+                    if (e.size > 60 * 1024 * 1024) throw Exception("подозрительно большой $name")
+                    val out = java.io.File(tmpDir, name)
+                    // canonical check: out обязан лежать внутри tmpDir
+                    require(out.canonicalPath.startsWith(tmpDir.canonicalPath + java.io.File.separator)) { "zip-slip" }
                     zf.getInputStream(e).use { ins -> out.outputStream().use { ins.copyTo(it) } }
+                    require(out.length() > 100 * 1024) { "$name слишком мал, архив бит" }
                 }
             }
+            for (name in allowed) {
+                val f = java.io.File(tmpDir, name)
+                require(f.exists() && f.length() > 100 * 1024) { "в архиве нет $name" }
+            }
+            // atomic install: tmp -> final
+            for (name in allowed) {
+                val src = java.io.File(tmpDir, name)
+                val dst = java.io.File(dir, name)
+                if (dst.exists()) dst.delete()
+                require(src.renameTo(dst)) {
+                    src.copyTo(dst, overwrite = true)
+                    src.delete()
+                    dst.exists()
+                }
+            }
+            try { tmpDir.deleteRecursively() } catch (_: Exception) { }
+            tmpDir = null
             val ok = voiceEngineFileReady()
             withContext(Dispatchers.Main) {
                 refreshVoiceEngineState()
                 status = if (ok) "Голосовой движок готов." else "Не вышло распаковать."
+                if (!ok) voiceEngineState = "error"
             }
         } catch (e: Exception) {
-            withContext(Dispatchers.Main) { status = "Ошибка распаковки: ${e.message?.take(120)}" }
+            try { tmpDir?.deleteRecursively() } catch (_: Exception) { }
+            withContext(Dispatchers.Main) {
+                voiceEngineState = "error"
+                status = "Ошибка распаковки: ${e.message?.take(120)}"
+            }
         }
     } }
     fun notesDir(): File = File(ctx.getExternalFilesDir(null), "notes").apply { mkdirs() }
@@ -644,13 +687,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun startRoundTable(topic: String, rounds: Int, append: Boolean = false) {
         val parts = personas.filter { it.id in rtSelected }.take(4)
         if (topic.isBlank() || parts.size < 2 || rtRunning || deviceBusy() || pBusy) return
+        // P0.1: новый стол чистит, "Ещё круг" сохраняет предыдущие turns.
+        val seedTurns = com.neuropocket.app.core.RoundTableLogic.initialTurns(rtTurns, append)
         if (!append) rtTurns = emptyList()
         stopSpeak()
         rtRunning = true
         rtCancel = false
-        rtTurns = emptyList()
         status = "Круглый стол идёт…"
-        val seedAcc = rtTurns.joinToString("\n") { it.name + ": " + it.text }.take(2000)
+        val seedAcc = com.neuropocket.app.core.RoundTableLogic.buildSeedContext(seedTurns)
         viewModelScope.launch(Dispatchers.IO) {
             llama.maxTokens = 160; llama.topP = topP; llama.topK = topK
             val acc = StringBuilder(seedAcc)
@@ -750,6 +794,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val rc = try {
                 if (!LlamaNative.available) -99 else LlamaNative.loadEmbed(f.absolutePath, threadsEffective())
             } catch (e: Exception) { -98 }
+            if (rc == 0) loadedEmbedPath = f.absolutePath
             withContext(Dispatchers.Main) {
                 refreshEmbedState()
                 status = if (rc == 0) "Вектора в RAM." else "Ошибка векторов: $rc"
@@ -784,18 +829,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 for (name in noteFiles) {
                     val chunks = chunkText(name, readNote(name))
                     val texts = chunks.map { "passage: " + it.second.take(800) }
+                    var base = 0 // глобальный индекс чанка внутри файла
                     for (batch in texts.chunked(16)) {
                         val vecs = try { LlamaNative.embedBatch(batch.toTypedArray()) } catch (_: Exception) { null }
-                        if (vecs == null) continue
+                        if (vecs == null) { base += batch.size; continue }
                         val dim = try { LlamaNative.embedDim() } catch (_: Exception) { 0 }
-                        if (dim <= 0) continue
-                        batch.indices.forEach { bi ->
-                            val v = vecs.copyOfRange(bi * dim, minOf((bi + 1) * dim, vecs.size))
-                            if (v.size == dim) {
-                                val (cid, txt) = chunks[texts.indexOf(batch[bi])]
-                                all[cid] = RagChunk(name, txt, v.toList())
-                            }
+                        if (dim <= 0) { base += batch.size; continue }
+                        // P0: маппинг без texts.indexOf (ломался на дубликатах текста).
+                        val splits = com.neuropocket.app.core.RagUtils.splitBatch(vecs, batch.size, dim)
+                        for ((bi, v) in splits) {
+                            val (cid, txt) = chunks[base + bi]
+                            all[cid] = RagChunk(name, txt, v.toList())
                         }
+                        base += batch.size
                     }
                 }
                 val frozen: Map<String, RagChunk> = all.toMap()
@@ -821,13 +867,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun cosine(a: List<Float>, b: FloatArray): Double {
-        var dot = 0.0; var na = 0.0; var nb = 0.0
-        for (i in a.indices) {
-            dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]
-        }
-        return if (na == 0.0 || nb == 0.0) 0.0 else dot / (kotlin.math.sqrt(na) * kotlin.math.sqrt(nb))
-    }
+    private fun cosine(a: List<Float>, b: FloatArray): Double =
+        com.neuropocket.app.core.RagUtils.cosine(a, b)
 
     fun askNotes(q: String) {
         if (q.isBlank() || ragBusy) return
@@ -855,8 +896,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     withContext(Dispatchers.Main) { status = "Не вышел вектор вопроса."; ragBusy = false }
                     return@launch
                 }
-                val top = idx.map { it to cosine(it.vec, qv) }.sortedByDescending { it.second }.take(3)
-                val ctxText = top.joinToString("\n---\n") { "[${it.first.file}] ${it.first.text.take(600)}" }
+                // P0: порог релевантности + честное "не найдено", не слепой top-3.
+                val scored = idx.map { com.neuropocket.app.core.RagUtils.Scored(it, cosine(it.vec, qv)) }
+                val top = com.neuropocket.app.core.RagUtils.topK(scored, 3, minScore = 0.25)
+                if (top.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        ragResult = "В заметках не найдено релевантного контекста. Попробуй переформулировать или добавь заметки."
+                        ragBusy = false; status = "Релевантного контекста нет."
+                    }
+                    return@launch
+                }
+                val ctxText = top.joinToString("\n---\n") {
+                    "[${it.item.file} • score=${"%.2f".format(it.score)}] ${it.item.text.take(600)}"
+                }
                 withContext(Dispatchers.Main) { status = "Спрашиваю движок…" }
                 llama.maxTokens = maxTokens; llama.topP = topP; llama.topK = topK
                 val p = activePersona
@@ -1975,7 +2027,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun gpuSupported(): Boolean = llama.gpuSupported()
 
     fun diagText(): String = buildString {
-        append("NeuroPocket 1.17 dev\n")
+        // Single version source: BuildConfig.VERSION_NAME (не хардкод "1.17").
+        append("NeuroPocket ").append(try { com.neuropocket.app.BuildConfig.VERSION_NAME } catch (_: Exception) { appVersion }).append("\n")
         append("engine=").append(engineLabel()).append("\n")
         append("llamaLoaded=").append(nativeLoaded).append(" whisper=").append(whisperLoaded)
         append(" sd=").append(sdLoaded).append(" vision=").append(visionLoaded)
@@ -1990,10 +2043,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun loadFileToRam(f: File, nCtx: Int = -1) {
         if (busy || agentRunning || sdBusy) { status = "Дождись конца текущей задачи."; return }
+        // P0.6: не грузить mmproj/embed как текстовый LLM.
+        val role = com.neuropocket.app.core.ModelRoles.classify(f.name)
+        if (role == com.neuropocket.app.core.ModelRole.MM_PROJECTOR) {
+            status = "Это mmproj — грузи кнопкой «Зрение в RAM», а не как текст."
+            return
+        }
+        if (role == com.neuropocket.app.core.ModelRole.EMBEDDING) {
+            status = "Это эмбеддинги — грузи кнопкой «Вектора в RAM»."
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
         val ctxN = if (nCtx > 0) nCtx else ctxSize
         withContext(Dispatchers.Main) { status = "Загружаю ${f.name} в RAM… (ctx $ctxN, gpu $gpuLayers)" }
         val rc = try { llama.load(f.absolutePath, ctxN, threadsEffective(), gpuLayers) } catch (e: Exception) { -99 }
+        if (rc == 0) loadedTextPath = f.absolutePath
         withContext(Dispatchers.Main) {
             refreshNativeState()
             NpLog.i("llm", "load rc=$rc file=" + f.name)
@@ -2009,17 +2073,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun unloadNative() { viewModelScope.launch(Dispatchers.IO) {
         try { llama.unload() } catch (_: Exception) {}
+        loadedTextPath = null
         withContext(Dispatchers.Main) { refreshNativeState(); status = "Модель выгружена из RAM." }
     } }
 
     fun unloadWhisper() { viewModelScope.launch(Dispatchers.IO) {
         try { WhisperNative.unload() } catch (_: Exception) {}
+        loadedWhisperPath = null
         withContext(Dispatchers.Main) { refreshWhisperState() }
     } }
 
     fun unloadSd() { viewModelScope.launch(Dispatchers.IO) {
         try { com.neuropocket.app.engine.SdNative.unload() } catch (_: Exception) {}
+        loadedSdPath = null
         withContext(Dispatchers.Main) { refreshSdState() }
+    } }
+
+    fun unloadVision() { viewModelScope.launch(Dispatchers.IO) {
+        try { LlamaNative.unloadVision() } catch (_: Exception) {}
+        loadedVisionPath = null
+        withContext(Dispatchers.Main) { refreshVisionState() }
+    } }
+
+    fun unloadEmbed() { viewModelScope.launch(Dispatchers.IO) {
+        try { LlamaNative.unloadEmbed() } catch (_: Exception) {}
+        loadedEmbedPath = null
+        withContext(Dispatchers.Main) { refreshEmbedState() }
     } }
 
     private fun allIdle(): Boolean =
@@ -2067,6 +2146,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var lastWhisperName: String? = null
     private var lastSdName: String? = null
+    // P0.6: exact loaded paths — runtime знает ЧТО загружено (не по расширению).
+    var loadedTextPath: String? = null; private set
+    var loadedWhisperPath: String? = null; private set
+    var loadedSdPath: String? = null; private set
+    var loadedVisionPath: String? = null; private set
+    var loadedEmbedPath: String? = null; private set
 
     fun refreshWhisperState() {
         whisperLoaded = try { WhisperNative.available && WhisperNative.isLoaded() } catch (_: Exception) { false }
@@ -2082,7 +2167,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
         withContext(Dispatchers.Main) { status = "Загружаю whisper ${f.name}…" }
         val rc = try { if (!WhisperNative.available) -99 else WhisperNative.loadModel(f.absolutePath) } catch (e: Exception) { -98 }
-        if (rc == 0) { Store.setLastWhisper(ctx, f.name); lastWhisperName = f.name }
+        if (rc == 0) { Store.setLastWhisper(ctx, f.name); lastWhisperName = f.name; loadedWhisperPath = f.absolutePath }
         withContext(Dispatchers.Main) {
             refreshWhisperState()
             status = when (rc) {
@@ -2209,7 +2294,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             if (!com.neuropocket.app.engine.SdNative.available) -99
             else com.neuropocket.app.engine.SdNative.loadModel(f.absolutePath, "", taesd, threadsEffective())
         } catch (e: Exception) { -98 }
-        if (rc == 0) { Store.setLastSd(ctx, f.name); lastSdName = f.name }
+        if (rc == 0) { Store.setLastSd(ctx, f.name); lastSdName = f.name; loadedSdPath = f.absolutePath }
         withContext(Dispatchers.Main) {
             refreshSdState()
             status = when (rc) {
@@ -2348,13 +2433,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     val cur = try {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: ""
                     } catch (_: Exception) { "" }
-                    val curBase = cur.split("-", " ").firstOrNull() ?: cur
-                    val latBase = tag.trimStart('v')
+                    // P0.8: semantic comparison вместо equality строк.
+                    // "1.24.0-plan5" vs "v1.24.0" корректно сравниваются.
+                    val cmp = try { com.neuropocket.app.core.SemVer.compare(tag, cur) } catch (_: Exception) { 0 }
                     withContext(Dispatchers.Main) {
                         if (tag.isBlank() || apkUrl.isNullOrBlank()) {
                             updateInfo = "В релизе нет APK."
-                        } else if (latBase == curBase) {
+                        } else if (cmp == 0) {
                             updateInfo = "У тебя свежая версия ($cur)."
+                        } else if (cmp < 0) {
+                            updateInfo = "У тебя новее ($cur), чем в релизе ($tag). Обновление не нужно."
                         } else {
                             updateInfo = "Доступно $tag (у тебя $cur).\n$body"
                             updateUrl = apkUrl
@@ -2422,6 +2510,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val rc = try {
                 if (!LlamaNative.available) -99 else LlamaNative.loadVision(f.absolutePath, threadsEffective())
             } catch (e: Exception) { -98 }
+            if (rc == 0) loadedVisionPath = f.absolutePath
             withContext(Dispatchers.Main) {
                 refreshVisionState()
                 status = when (rc) {
@@ -2512,37 +2601,72 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun scanModels() { refreshModelFiles(); refreshGallery(); status = if (modelFiles.isEmpty()) "GGUF не найдены. Скачай из каталога." else "Найдено моделей: ${modelFiles.size}" }
 
-    /** Удалить файл модели/голоса с диска. */
+    /** Удалить файл модели/голоса с диска. P0.6: unload только ИМЕННО этого файла. */
     fun deleteModelFile(f: java.io.File) {
         if (deviceBusy()) { status = "Дождись конца текущей задачи."; return }
         viewModelScope.launch(Dispatchers.IO) {
             val name = f.name
+            val path = try { f.canonicalPath } catch (_: Exception) { f.absolutePath }
+            val role = com.neuropocket.app.core.ModelRoles.classify(name)
+            // P0.6: определить, загружен ли ИМЕННО этот файл — до удаления.
+            val isLoadedText = loadedTextPath != null && java.io.File(loadedTextPath!!).let {
+                try { it.canonicalPath == path } catch (_: Exception) { it.absolutePath == f.absolutePath }
+            }
+            val isLoadedWhisper = loadedWhisperPath != null && java.io.File(loadedWhisperPath!!).let {
+                try { it.canonicalPath == path } catch (_: Exception) { it.absolutePath == f.absolutePath }
+            }
+            val isLoadedSd = loadedSdPath != null && java.io.File(loadedSdPath!!).let {
+                try { it.canonicalPath == path } catch (_: Exception) { it.absolutePath == f.absolutePath }
+            }
+            val isLoadedVision = loadedVisionPath != null && java.io.File(loadedVisionPath!!).let {
+                try { it.canonicalPath == path } catch (_: Exception) { it.absolutePath == f.absolutePath }
+            }
+            val isLoadedEmbed = loadedEmbedPath != null && java.io.File(loadedEmbedPath!!).let {
+                try { it.canonicalPath == path } catch (_: Exception) { it.absolutePath == f.absolutePath }
+            }
+            // Корректный unload соответствующего рантайма — до удаления файла.
+            // Не ломаем vision/embed при удалении обычного текстового GGUF и наоборот.
+            try {
+                when (role) {
+                    com.neuropocket.app.core.ModelRole.TEXT_LLM,
+                    com.neuropocket.app.core.ModelRole.VISION_LLM -> if (isLoadedText) { llama.unload(); loadedTextPath = null }
+                    com.neuropocket.app.core.ModelRole.MM_PROJECTOR -> if (isLoadedVision) { LlamaNative.unloadVision(); loadedVisionPath = null }
+                    com.neuropocket.app.core.ModelRole.EMBEDDING -> if (isLoadedEmbed) { LlamaNative.unloadEmbed(); loadedEmbedPath = null }
+                    com.neuropocket.app.core.ModelRole.WHISPER -> if (isLoadedWhisper) { WhisperNative.unload(); loadedWhisperPath = null }
+                    com.neuropocket.app.core.ModelRole.SD -> if (isLoadedSd) { com.neuropocket.app.engine.SdNative.unload(); loadedSdPath = null }
+                    com.neuropocket.app.core.ModelRole.TTS, com.neuropocket.app.core.ModelRole.VAD,
+                    com.neuropocket.app.core.ModelRole.UNKNOWN -> { /* ниже — общая ветка голосов */ }
+                }
+            } catch (_: Exception) { }
             try {
                 if (f.isDirectory) f.deleteRecursively() else f.delete()
             } catch (_: Exception) { }
-            // если удалили загруженное — выгрузить и сбросить состояние
-            if (name.endsWith(".gguf") && nativeLoaded) {
-                try { llama.unload() } catch (_: Exception) { }
-            }
-            if (name.endsWith(".bin") && whisperLoaded) {
-                try { WhisperNative.unload() } catch (_: Exception) { }
-            }
-            if ((name.endsWith(".safetensors") || name.endsWith(".ckpt")) && sdLoaded) {
-                try { com.neuropocket.app.engine.SdNative.unload() } catch (_: Exception) { }
-            }
             if (activeVoice != null && f.absolutePath.contains("voices")) {
                 try { sherpa?.release() } catch (_: Exception) { }
                 sherpa = null
+                if (loadedTextPath?.contains("voices") == true) loadedTextPath = null
             }
             refreshModelFiles()
             refreshNativeState(); refreshWhisperState(); refreshSdState(); refreshVisionState(); refreshEmbedState()
+            // Если runtime считал файл загруженным, но unload не сработал — сбросить флаг.
+            if (isLoadedText && !nativeLoaded) loadedTextPath = null
+            if (isLoadedWhisper && !whisperLoaded) loadedWhisperPath = null
+            if (isLoadedSd && !sdLoaded) loadedSdPath = null
+            if (isLoadedVision && !visionLoaded) loadedVisionPath = null
+            if (isLoadedEmbed && !embedLoaded) loadedEmbedPath = null
             withContext(Dispatchers.Main) { status = "Удалено: $name" }
         }
     }
 
     private var resetArmed = false
 
-    /** Сброс всех данных (двухшаговый). Модели на диске не трогает. */
+    /** P0.5: сброс по явному подтверждению диалога (один вызов). */
+    fun factoryResetConfirmed() { viewModelScope.launch(Dispatchers.IO) {
+        resetArmed = false
+        doFactoryReset()
+    } }
+
+    /** Сброс всех данных (двухшаговый legacy). Модели на диске не трогает. */
     fun factoryReset() { viewModelScope.launch(Dispatchers.IO) {
         if (!resetArmed) {
             withContext(Dispatchers.Main) {
@@ -2554,22 +2678,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             return@launch
         }
         resetArmed = false
+        doFactoryReset()
+    } }
+
+    private suspend fun doFactoryReset() = withContext(Dispatchers.IO) {
         try {
             try { llama.unload() } catch (_: Exception) { }
             try { WhisperNative.unload() } catch (_: Exception) { }
+            try { LlamaNative.unloadVision() } catch (_: Exception) { }
+            try { LlamaNative.unloadEmbed() } catch (_: Exception) { }
             try { com.neuropocket.app.engine.SdNative.unload() } catch (_: Exception) { }
             try { sherpa?.release() } catch (_: Exception) { }
             sherpa = null
-            ctx.getSharedPreferences("np_secret_keys", 0).edit().clear().apply()
-            // чистим DataStore целиком
-            ctx.dataStoreFile("neuro_pocket.preferences_pb")?.let { dsf ->
-                try { dsf.delete() } catch (_: Exception) { }
-            }
+            loadedTextPath = null; loadedWhisperPath = null; loadedSdPath = null
+            loadedVisionPath = null; loadedEmbedPath = null
+            // P0.5: корректный сброс через DataStore edit{clear()}, не удалением файла.
+            Store.clearAll(ctx)
+            KeyVault.clear(ctx)
             try { ragIndexFile().delete() } catch (_: Exception) { }
         } catch (_: Exception) { }
         reload()
-        withContext(Dispatchers.Main) { status = "Всё сброшено. Как новое." }
-    } }
+        // P0.5: честно — модели/картинки/заметки/аватары на диске остаются.
+        withContext(Dispatchers.Main) { status = "Настройки, чаты и лента сброшены. Модели, заметки, картинки и голоса на диске сохранены." }
+    }
 
     var backupMsg by mutableStateOf(""); private set
     var sdEngineState by mutableStateOf(""); private set // builtin | file | missing | error

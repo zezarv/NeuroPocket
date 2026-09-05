@@ -29,7 +29,7 @@ Offline-first AI hub for Android: chat, personas, voice, image gen, RAG — on-d
 
 ## Быстрый старт (пользователь)
 
-1. Установи APK из [Releases](../../releases) (нужен ARM64, Android 8+).
+1. Установи APK из [Releases](../../releases) (нужен ARM64, Android 9+ / minSdk 28).
 2. Пройди мастера: телефон / ПК / бесплатное облако.
 3. Для телефона: Модели → скачай GGUF (начни с Llama 3.2 3B) → «В RAM» → Чат.
 4. Для ПК: подставь IP в пресете LM Studio/Ollama → «Проверить».
@@ -63,6 +63,14 @@ app/src/main/
 
 | Версия | Главное |
 |---|---|
+| v1.25.0-rc.1 | P0-харденинг: RoundTable append, STT persistence, backup backward-compat, safe reset/delete, semver updater, NSC, unit-тесты ядра |
+| v1.24 | Удаление файлов, factory reset, auto STT, продолжение круглого стола, edit постов, лёгкий voice engine |
+| v1.23 | Папки+поиск в drawer, SD hires+пресеты, репосты, виджет |
+| v1.22 | Barge-in, sys bars, avatar import, md quotes/headers, feed search, hero gradient |
+| v1.21 | Regenerate, rename, timestamps, API timeout, storage, feed refresh, hf log |
+| v1.20 | System bars, persona avatar import, md quotes/headers, feed search |
+| v1.19 | Comments, md lists/tables, notes search, VAD tuning, TAESD, autopost, pins, timings |
+| v1.18 | Лёгкий APK (SD engine on-demand), in-app updates, SD controls+img2img, whisper timestamps, chat export/search, auto-backup |
 | v1.17 | Диагностика, шифрование бэкапа, шаринг персон, ctx 8192, «Думаю/Печатает» |
 | v1.16 | TAESD, автопостинг, пины, замеры whisper/SD |
 | v1.15 | Шаринг в приложение, SD 768/img2img, таймкоды, экспорт чата, автобэкап |

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  P0.10: максимально узкий cleartext без поломки LAN-провайдеров.
+  Произвольные LAN-IP пользователя (192.168.x, 10.x, 172.16-31.x) нельзя выразить
+  CIDR в Network Security Config, поэтому base остаётся разрешающим для LAN.
+  Публичные API-хосты явно запрещают cleartext (defense in depth, https обязателен).
+  Дополнительно app-layer guard: core/NetworkPolicy.isUrlAllowed() блокирует
+  http:// для не-приватных хостов в RemoteEngine до выполнения запроса.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <!-- Публичные хосты: только https, случайный http downgrade блокируется ОС. -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">generativelanguage.googleapis.com</domain>
+        <domain includeSubdomains="true">openrouter.ai</domain>
+        <domain includeSubdomains="true">api.groq.com</domain>
+        <domain includeSubdomains="true">api.mistral.ai</domain>
+        <domain includeSubdomains="true">api.x.ai</domain>
+        <domain includeSubdomains="true">text.pollinations.ai</domain>
+        <domain includeSubdomains="true">api.github.com</domain>
+        <domain includeSubdomains="true">github.com</domain>
+        <domain includeSubdomains="true">huggingface.co</domain>
+        <domain includeSubdomains="true">cdn-lfs.huggingface.co</domain>
+    </domain-config>
+</network-security-config>
