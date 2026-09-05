@@ -1436,12 +1436,33 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 withContext(Dispatchers.Main) {
                     if (upd.isNotEmpty()) downloads = downloads + upd
-                    // успешные убираем из виду через пару секунд? сразу + скан
                     val doneIds = downloads.filter { it.value.done }.keys
                     if (doneIds.isNotEmpty()) {
                         downloads = downloads - doneIds
+                        for (id in doneIds) {
+                            val fn = upd[id]?.fileName ?: ""
+                            if (fn == "libnpsd.so") {
+                                try {
+                                    val src = java.io.File(ctx.getExternalFilesDir(null), "models/libnpsd.so")
+                                    val dst = sdEngineFile()
+                                    if (src.exists()) {
+                                        src.copyTo(dst, overwrite = true)
+                                        src.delete()
+                                        ensureSdEngine()
+                                        refreshSdEngineState()
+                                        status = "Движок SD готов."
+                                    }
+                                } catch (_: Exception) { }
+                            }
+                            if (fn == "NeuroPocket-update.apk") {
+                                status = "Обновление скачано."
+                                promptInstallUpdate()
+                            }
+                        }
                         scanModels()
-                        status = "Загрузка завершена."
+                        if (status != "Движок SD готов." && !status.startsWith("Обновление")) {
+                            status = "Загрузка завершена."
+                        }
                     }
                 }
                 if (needScan) { /* скан уже вызван выше */ }
@@ -1745,7 +1766,31 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     } }
 
+    fun sdEngineDir(): java.io.File = java.io.File(ctx.getExternalFilesDir(null), "sd_engine").apply { mkdirs() }
+    fun sdEngineFile(): java.io.File = java.io.File(sdEngineDir(), "libnpsd.so")
+
+    /** Правда ли, что нативный движок SD доступен (встроен или подгружен). */
+    fun ensureSdEngine(): Boolean {
+        val nat = com.neuropocket.app.engine.SdNative
+        if (nat.available) return true
+        val f = sdEngineFile()
+        if (f.exists() && f.length() > 10 * 1024 * 1024) {
+            return try { nat.loadFromFile(f) } catch (_: Exception) { false }
+        }
+        return false
+    }
+
+    fun refreshSdEngineState() {
+        sdEngineState = when {
+            !com.neuropocket.app.engine.SdNative.available && !sdEngineFile().exists() -> "missing"
+            com.neuropocket.app.engine.SdNative.available -> "ok"
+            else -> "file"
+        }
+    }
+
     fun refreshSdState() {
+        try { ensureSdEngine() } catch (_: Exception) { }
+        refreshSdEngineState()
         sdLoaded = try { com.neuropocket.app.engine.SdNative.available && com.neuropocket.app.engine.SdNative.isLoaded() } catch (_: Exception) { false }
         sdInfo = when {
             !com.neuropocket.app.engine.SdNative.available -> "sd: .so нет"
@@ -1757,6 +1802,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun loadSdToRam(f: File) {
         if (deviceBusy()) { status = "Дождись конца текущей задачи."; return }
         viewModelScope.launch(Dispatchers.IO) {
+        if (!ensureSdEngine()) {
+            withContext(Dispatchers.Main) { status = "Нет движка SD: скачай его ниже (51 МБ)." }
+            return@launch
+        }
         withContext(Dispatchers.Main) { status = "Загружаю SD ${f.name}… (долго, файл большой)" }
         val taesd = taesdFiles.firstOrNull()?.absolutePath ?: ""
         val rc = try {
@@ -1835,6 +1884,130 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cancelSd() { try { com.neuropocket.app.engine.SdNative.cancel() } catch (_: Exception) {} }
+
+    fun downloadSdEngine(url: String) {
+        if (url.isBlank()) return
+        try {
+            downloads.values.find { it.fileName == "libnpsd.so" && !it.done }?.let { return }
+            val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val req = DownloadManager.Request(Uri.parse(url)).apply {
+                setTitle("libnpsd.so")
+                setDescription("NeuroPocket: движок фото")
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalFilesDir(ctx, "models", "libnpsd.so")
+                setAllowedOverMetered(!wifiOnly); setAllowedOverRoaming(false)
+            }
+            val id = dm.enqueue(req)
+            downloads = downloads + (id to DlInfo("libnpsd.so", "В очереди…", 0f, false, false))
+            status = "Качаю движок SD (51 МБ)…"
+            startDlPoll()
+        } catch (e: Exception) { status = "Ошибка загрузки: ${e.message}" }
+    }
+
+    /** URL движка из последнего релиза GitHub. null = не найден/репо приватно. */
+    suspend fun fetchSdEngineUrl(): String? = withContext(Dispatchers.IO) {
+        try {
+            val req = okhttp3.Request.Builder()
+                .url("https://api.github.com/repos/zezarv/NeuroPocket/releases/latest")
+                .header("Accept", "application/vnd.github+json").get().build()
+            com.neuropocket.app.engine.NetHttp.client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val js = org.json.JSONObject(resp.body?.string() ?: "")
+                val arr = js.optJSONArray("assets") ?: return@withContext null
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    if (o.optString("name").startsWith("libnpsd")) {
+                        return@withContext o.optString("browser_download_url").ifBlank { null }
+                    }
+                }
+                null
+            }
+        } catch (_: Exception) { null }
+    }
+
+    // ---------- Обновления приложения ----------
+    fun checkUpdates() {
+        if (updateBusy) return
+        updateBusy = true
+        updateInfo = null
+        updateUrl = null
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val req = okhttp3.Request.Builder()
+                    .url("https://api.github.com/repos/zezarv/NeuroPocket/releases/latest")
+                    .header("Accept", "application/vnd.github+json").get().build()
+                com.neuropocket.app.engine.NetHttp.client.newCall(req).execute().use { resp ->
+                    if (resp.code == 404) throw Exception("релиз не найден (репо приватный?)")
+                    if (!resp.isSuccessful) throw Exception("HTTP " + resp.code)
+                    val js = org.json.JSONObject(resp.body?.string() ?: "")
+                    val tag = js.optString("tag_name", "").trim()
+                    val body = js.optString("body", "").take(600)
+                    var apkUrl: String? = null
+                    val arr = js.optJSONArray("assets")
+                    if (arr != null) for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        if (o.optString("name").endsWith(".apk")) { apkUrl = o.optString("browser_download_url"); break }
+                    }
+                    val cur = try {
+                        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: ""
+                    } catch (_: Exception) { "" }
+                    val curBase = cur.split("-", " ").firstOrNull() ?: cur
+                    val latBase = tag.trimStart('v')
+                    withContext(Dispatchers.Main) {
+                        if (tag.isBlank() || apkUrl.isNullOrBlank()) {
+                            updateInfo = "В релизе нет APK."
+                        } else if (latBase == curBase) {
+                            updateInfo = "У тебя свежая версия ($cur)."
+                        } else {
+                            updateInfo = "Доступно $tag (у тебя $cur).\n$body"
+                            updateUrl = apkUrl
+                        }
+                        updateBusy = false
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    updateInfo = "Не вышло проверить: ${e.message?.take(140)}"
+                    updateBusy = false
+                }
+            }
+        }
+    }
+
+    fun downloadUpdate() {
+        val url = updateUrl ?: return
+        try {
+            val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            val req = DownloadManager.Request(Uri.parse(url)).apply {
+                setTitle("NeuroPocket-update.apk")
+                setDescription("NeuroPocket: обновление")
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalFilesDir(ctx, "updates", "NeuroPocket-update.apk")
+                setAllowedOverMetered(!wifiOnly); setAllowedOverRoaming(false)
+            }
+            val id = dm.enqueue(req)
+            downloads = downloads + (id to DlInfo("NeuroPocket-update.apk", "В очереди…", 0f, false, false))
+            status = "Качаю обновление…"
+            startDlPoll()
+        } catch (e: Exception) { status = "Ошибка загрузки: ${e.message}" }
+    }
+
+    fun promptInstallUpdate() {
+        try {
+            val f = java.io.File(ctx.getExternalFilesDir(null), "updates/NeuroPocket-update.apk")
+            if (!f.exists()) { status = "Файл обновления не найден."; return }
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                ctx, ctx.packageName + ".fileprovider", f)
+            val it = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ctx.startActivity(it)
+        } catch (e: Exception) {
+            status = "Не открылось: разреши «установку из неизвестных источников»."
+        }
+    }
 
     fun refreshVisionState() {
         visionLoaded = try { LlamaNative.available && LlamaNative.isVisionLoaded() } catch (_: Exception) { false }
@@ -1942,6 +2115,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun scanModels() { refreshModelFiles(); refreshGallery(); status = if (modelFiles.isEmpty()) "GGUF не найдены. Скачай из каталога." else "Найдено моделей: ${modelFiles.size}" }
 
     var backupMsg by mutableStateOf(""); private set
+    var sdEngineState by mutableStateOf(""); private set // builtin | file | missing | error
+    var updateInfo by mutableStateOf<String?>(null); private set
+    var updateUrl by mutableStateOf<String?>(null); private set
+    var updateBusy by mutableStateOf(false); private set
+    var sdEngineUrl by mutableStateOf<String?>(null); private set
+    var sdEngineBusy by mutableStateOf(false); private set
+
+    fun resolveSdEngineUrl() {
+        if (sdEngineBusy) return
+        sdEngineBusy = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val u = fetchSdEngineUrl()
+            withContext(Dispatchers.Main) {
+                sdEngineUrl = u
+                sdEngineBusy = false
+                if (u == null) status = "Движок не найден в релизах (нужен публичный репо)."
+            }
+        }
+    }
     var chatDraft by mutableStateOf<String?>(null); private set
     var pendingVision by mutableStateOf<File?>(null); private set
     var shareTarget by mutableStateOf<String?>(null); private set

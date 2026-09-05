@@ -3,10 +3,23 @@ package com.neuropocket.app.engine
 object SdNative {
     var available: Boolean = false
         private set
+    var fromFile: Boolean = false
+        private set
 
     init {
         available = try {
             System.loadLibrary("npsd")
+            true
+        } catch (_: UnsatisfiedLinkError) { false } catch (_: Exception) { false }
+    }
+
+    /** Догрузка движка из файла (лёгкий APK). */
+    fun loadFromFile(f: java.io.File): Boolean {
+        if (available) return true
+        return try {
+            System.load(f.absolutePath)
+            fromFile = true
+            available = true
             true
         } catch (_: UnsatisfiedLinkError) { false } catch (_: Exception) { false }
     }

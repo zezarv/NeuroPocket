@@ -16,8 +16,8 @@ android {
         applicationId = "com.neuropocket.app"
         minSdk = 28
         targetSdk = 34
-        versionCode = 18
-        versionName = "1.17.0-plan2"
+        versionCode = 20
+        versionName = "1.18.0-light"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -83,6 +83,10 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        // Лёгкий APK: движок SD (51 МБ) качается из релизов отдельно
+        jniLibs {
+            excludes += "lib/arm64-v8a/libnpsd.so"
         }
     }
 }

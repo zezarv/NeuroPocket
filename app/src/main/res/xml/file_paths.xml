@@ -2,6 +2,7 @@
 <paths>
     <external-files-path name="models" path="models/" />
     <external-files-path name="pictures" path="pictures/" />
+    <external-files-path name="updates" path="updates/" />
     <cache-path name="cache" path="." />
     <external-cache-path name="ext_cache" path="." />
 </paths>

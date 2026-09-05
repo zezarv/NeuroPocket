@@ -747,6 +747,27 @@ fun ToolsScreen(
                         Text("Фото (SD локально, 512px)", style = MaterialTheme.typography.titleSmall)
                         Text(vm.sdInfo + " • CPU: минуты на кадр, не сворачивай", style = MaterialTheme.typography.bodySmall)
                         Spacer(Modifier.height(6.dp))
+                        Text("Движок SD: " + when (vm.sdEngineState) {
+                            "ok" -> "встроен/готов"
+                            "file" -> "файл есть"
+                            else -> "нужно скачать (51 МБ)"
+                        }, style = MaterialTheme.typography.labelSmall)
+                        if (vm.sdEngineState == "missing") {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (vm.sdEngineUrl == null) {
+                                    OutlinedButton(onClick = { vm.resolveSdEngineUrl() },
+                                        enabled = !vm.sdEngineBusy, modifier = Modifier.weight(1f)) {
+                                        Text(if (vm.sdEngineBusy) "Ищу…" else "Найти движок")
+                                    }
+                                } else {
+                                    Button(onClick = {
+                                        vm.sdEngineUrl?.let { vm.downloadSdEngine(it) }
+                                    }, modifier = Modifier.weight(1f)) { Text("Скачать (51 МБ)") }
+                                }
+                            }
+                            DlRow(vm, "libnpsd.so")
+                            Spacer(Modifier.height(4.dp))
+                        }
                         Text("Модели .safetensors: ${vm.sdFiles.size}", style = MaterialTheme.typography.labelSmall)
                         vm.sdFiles.forEach { f ->
                             Row(verticalAlignment = Alignment.CenterVertically) {

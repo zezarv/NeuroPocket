@@ -643,7 +643,22 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
                             Text("Движок: ${vm.engineLabel()} (переключить)")
                         }
                         Spacer(Modifier.height(6.dp))
+                        if (vm.updateInfo != null) {
+                            Text(vm.updateInfo!!, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.secondary)
+                            if (vm.updateUrl != null) {
+                                Spacer(Modifier.height(6.dp))
+                                Button(onClick = { vm.downloadUpdate() }, modifier = Modifier.fillMaxWidth()) {
+                                    Text("Скачать и установить")
+                                }
+                                DlRow(vm, "NeuroPocket-update.apk")
+                            }
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { vm.checkUpdates() }, enabled = !vm.updateBusy,
+                                modifier = Modifier.weight(1f)) {
+                                Text(if (vm.updateBusy) "Проверка…" else "Обновления")
+                            }
                             OutlinedButton(onClick = { vm.markOnboarded(false) }, modifier = Modifier.weight(1f)) {
                                 Text("Обучение")
                             }
@@ -661,7 +676,7 @@ fun SettingsScreen(vm: AppViewModel, onOpenTab: (Int) -> Unit = {}, onOpenPerson
 }
 
 @Composable
-private fun DlRow(vm: AppViewModel, fileName: String) {
+fun DlRow(vm: AppViewModel, fileName: String) {
     val dl = vm.dlFor(fileName) ?: return
     val id = vm.downloads.entries.find { it.value.fileName == fileName }?.key
     Spacer(Modifier.height(6.dp))
