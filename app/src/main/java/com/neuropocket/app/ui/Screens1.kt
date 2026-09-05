@@ -425,6 +425,7 @@ fun ToolsScreen(
     var photoSize by remember { mutableIntStateOf(512) }
     var photoSampler by remember { mutableStateOf("lcm") }
     var photoSeed by remember { mutableStateOf("") }
+    var photoHires by remember { mutableStateOf(false) }
     var photoStrength by remember { mutableStateOf(0.6f) }
     var photoInit by remember { mutableStateOf<java.io.File?>(null) }
     var visPrompt by remember { mutableStateOf("") }
@@ -864,6 +865,22 @@ fun ToolsScreen(
                             modifier = Modifier.fillMaxWidth(), minLines = 2)
                         OutlinedTextField(photoNeg, { photoNeg = it }, label = { Text("Негативный промпт") },
                             modifier = Modifier.fillMaxWidth())
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(
+                                "Фото" to "blurry, low quality, watermark, text",
+                                "Аниме" to "lowres, bad anatomy, bad hands, watermark",
+                                "Чисто" to ""
+                            ).forEach { (nm, v) ->
+                                FilterChip(selected = photoNeg == v,
+                                    onClick = { photoNeg = v }, label = { Text(nm) })
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = photoHires, onCheckedChange = { photoHires = it })
+                            Text("HiRes-фикс x1.5 (намного дольше)",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f))
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedTextField(photoSteps, { photoSteps = it.filter { c -> c.isDigit() }.take(2) },
                                 label = { Text("Шаги (2-30)") }, modifier = Modifier.weight(1f))
@@ -910,7 +927,8 @@ fun ToolsScreen(
                                 vm.renderPhoto(
                                     photoPrompt, photoNeg, photoSize,
                                     photoSteps.toIntOrNull() ?: 6, 1.0f, photoSampler,
-                                    photoSeed.toLongOrNull() ?: 0L, photoInit, photoStrength
+                                    photoSeed.toLongOrNull() ?: 0L, photoInit, photoStrength,
+                                    photoHires
                                 )
                             }, enabled = vm.sdLoaded, modifier = Modifier.fillMaxWidth()) {
                                 Text(if (vm.sdLoaded) "Сгенерировать" else "Сначала модель в RAM")

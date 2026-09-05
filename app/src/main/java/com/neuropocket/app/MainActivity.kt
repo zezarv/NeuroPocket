@@ -31,6 +31,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleShare(intent: android.content.Intent) {
+        when (intent.action) {
+            "np.action.CHAT" -> {
+                vm.fireRoute("chat")
+                return
+            }
+            "np.action.VOICE" -> {
+                vm.fireRoute("tools:voice")
+                return
+            }
+        }
         if (intent.action != android.content.Intent.ACTION_SEND) return
         val type = intent.type ?: return
         when {
@@ -72,6 +82,10 @@ class MainActivity : ComponentActivity() {
                 var tab by remember { mutableIntStateOf(0) }
                 var hubRoute by remember { mutableStateOf<String?>(null) }
                 var overlay by remember { mutableStateOf<String?>(null) }
+                var drawerFind by remember { mutableStateOf("") }
+                var moveFor by remember { mutableStateOf<String?>(null) }
+                var menuFor by remember { mutableStateOf<String?>(null) }
+                var moveName by remember { mutableStateOf("") }
                 if (!vm.onboarded) {
                     OnboardingScreen(
                         vm,
@@ -145,15 +159,28 @@ class MainActivity : ComponentActivity() {
                                     vm.newChat(); scope.launch { drawer.close() }; openTab(1)
                                 }) { Icon(Icons.Default.Add, contentDescription = "Новый чат") }
                             }
+                            OutlinedTextField(drawerFind, { drawerFind = it },
+                                label = { Text("Найти чат…") },
+                                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                                singleLine = true)
                             HorizontalDivider(Modifier.padding(horizontal = 16.dp))
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                val base = if (drawerFind.isBlank()) vm.sessions
+                                else vm.sessions.filter { it.title.contains(drawerFind, true) }
                                 val groups = linkedMapOf<String, List<com.neuropocket.app.data.ChatSession>>()
-                                val pinned = vm.sessions.filter { it.pinned }
+                                val pinned = base.filter { it.pinned }
                                 if (pinned.isNotEmpty()) groups["Закреп"] = pinned
-                                vm.sessions.filter { !it.pinned }.groupBy { sessionDayGroup(it.updated) }
+                                val rest = base.filter { !it.pinned }
+                                rest.filter { it.folder.isNotBlank() }.groupBy { it.folder }
+                                    .toSortedMap().forEach { (k, v) -> groups["Папка: " + k] = v }
+                                rest.filter { it.folder.isBlank() }.groupBy { sessionDayGroup(it.updated) }
                                     .forEach { (k, v) -> groups[k] = v }
-                                listOf("Закреп", "Сегодня", "Вчера", "Ранее").forEach { g ->
+                                val order = listOf("Закреп") +
+                                    groups.keys.filter { it.startsWith("Папка: ") }.sorted() +
+                                    listOf("Сегодня", "Вчера", "Ранее")
+                                order.forEach { g ->
                                     val list = groups[g] ?: return@forEach
                                     item {
                                         Text(g, style = MaterialTheme.typography.labelLarge,
@@ -170,18 +197,25 @@ class MainActivity : ComponentActivity() {
                                                 openTab(1)
                                             },
                                             badge = {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    IconButton(onClick = { vm.togglePin(s.id) },
+                                                Box {
+                                                    IconButton(onClick = { menuFor = s.id },
                                                         modifier = Modifier.size(32.dp)) {
-                                                        Icon(Icons.Default.PushPin, contentDescription = "Закрепить",
-                                                            tint = if (s.pinned) MaterialTheme.colorScheme.primary
-                                                            else MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f),
+                                                        Icon(Icons.Default.MoreVert, contentDescription = "Ещё",
                                                             modifier = Modifier.size(18.dp))
                                                     }
-                                                    IconButton(onClick = { vm.deleteSession(s.id) },
-                                                        modifier = Modifier.size(32.dp)) {
-                                                        Icon(Icons.Default.DeleteOutline, contentDescription = "Удалить",
-                                                            modifier = Modifier.size(18.dp))
+                                                    DropdownMenu(
+                                                        expanded = menuFor == s.id,
+                                                        onDismissRequest = { menuFor = null }
+                                                    ) {
+                                                        DropdownMenuItem(
+                                                            text = { Text(if (s.pinned) "Открепить" else "Закрепить") },
+                                                            onClick = { vm.togglePin(s.id); menuFor = null })
+                                                        DropdownMenuItem(
+                                                            text = { Text("В папку…") },
+                                                            onClick = { moveFor = s.id; moveName = s.folder; menuFor = null })
+                                                        DropdownMenuItem(
+                                                            text = { Text("Удалить") },
+                                                            onClick = { vm.deleteSession(s.id); menuFor = null })
                                                     }
                                                 }
                                             },
@@ -189,6 +223,33 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
                                 }
+                            }
+                            if (moveFor != null) {
+                                AlertDialog(
+                                    onDismissRequest = { moveFor = null },
+                                    title = { Text("Папка чата") },
+                                    text = {
+                                        Column {
+                                            OutlinedTextField(moveName, { moveName = it },
+                                                label = { Text("Имя папки (пусто — без папки)") },
+                                                modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                            Spacer(Modifier.height(8.dp))
+                                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                vm.folders().filter { it.isNotBlank() }.take(6).forEach { f ->
+                                                    FilterChip(selected = moveName == f,
+                                                        onClick = { moveName = f }, label = { Text(f) })
+                                                }
+                                            }
+                                        }
+                                    },
+                                    confirmButton = {
+                                        Button(onClick = {
+                                            moveFor?.let { vm.moveSession(it, moveName) }
+                                            moveFor = null
+                                        }) { Text("Ок") }
+                                    },
+                                    dismissButton = { TextButton(onClick = { moveFor = null }) { Text("Отмена") } }
+                                )
                             }
                         }
                     }

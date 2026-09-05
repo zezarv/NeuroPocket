@@ -339,6 +339,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.Main) { activeSessionId = id; messages = cur }
     } }
 
+    fun folders(): List<String> =
+        sessions.mapNotNull { it.folder.ifBlank { null } }.distinct().sorted()
+
+    fun moveSession(id: String, folder: String) { viewModelScope.launch(Dispatchers.IO) {
+        val ses = Store.loadSessions(ctx).map {
+            if (it.id == id) it.copy(folder = folder.trim().take(24)) else it
+        }
+        Store.saveSessions(ctx, ses)
+        withContext(Dispatchers.Main) {
+            sessions = ses.sortedWith(compareByDescending<ChatSession> { it.pinned }.thenByDescending { it.updated })
+        }
+    } }
+
     fun togglePin(id: String) { viewModelScope.launch(Dispatchers.IO) {
         val ses = Store.loadSessions(ctx).map { if (it.id == id) it.copy(pinned = !it.pinned) else it }
         Store.saveSessions(ctx, ses)
@@ -1256,7 +1269,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.IO) {
             val prompt = "portrait avatar, ${per.name}, ${per.desc.take(150)}, high quality, centered face"
             val rgb = try {
-                com.neuropocket.app.engine.SdNative.render(prompt, "blurry, low quality", 512, 512, 6, 1.0f, System.currentTimeMillis(), "lcm")
+                com.neuropocket.app.engine.SdNative.render(prompt, "blurry, low quality", 512, 512, 6, 1.0f, System.currentTimeMillis(), "lcm", false)
             } catch (_: Exception) { null }
             if (rgb == null) {
                 withContext(Dispatchers.Main) { sdBusy = false; status = "SD не смог." }
@@ -2073,7 +2086,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun renderPhoto(
         prompt: String, neg: String, size: Int = 512, steps: Int = 6,
         cfg: Float = 1.0f, sampler: String = "lcm", seed: Long = 0L,
-        initFile: java.io.File? = null, strength: Float = 0.6f
+        initFile: java.io.File? = null, strength: Float = 0.6f, hires: Boolean = false
     ) {
         if (prompt.isBlank() || sdBusy || busy || agentRunning) return
         stopSpeak()
@@ -2098,9 +2111,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     bmp.getPixels(px, 0, iw, 0, 0, iw, ih)
                     bmp.recycle()
                     com.neuropocket.app.engine.SdNative.renderImg(
-                        prompt, neg, px, iw, ih, w, h, steps, cfg, useSeed, sampler, strength)
+                        prompt, neg, px, iw, ih, w, h, steps, cfg, useSeed, sampler, strength, hires)
                 } else {
-                    com.neuropocket.app.engine.SdNative.render(prompt, neg, w, h, steps, cfg, useSeed, sampler)
+                    com.neuropocket.app.engine.SdNative.render(prompt, neg, w, h, steps, cfg, useSeed, sampler, hires)
                 }
             } catch (e: Exception) { null }
             if (rgb == null) {
@@ -2389,6 +2402,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         pendingVision = null
         return f
     }
+    fun fireRoute(route: String) { shareTarget = route }
+
     fun consumeShareTarget(): String? {
         val s = shareTarget
         shareTarget = null

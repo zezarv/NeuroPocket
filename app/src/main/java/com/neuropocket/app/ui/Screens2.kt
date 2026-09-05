@@ -155,6 +155,9 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                             }
                             Text("${p.likes}")
                             Spacer(Modifier.weight(1f))
+                            TextButton(onClick = {
+                                if (author != null) vm.addPost(author.id, p.text)
+                            }) { Text("Репост") }
                             TextButton(onClick = { vm.deletePost(p.id) }) { Text("Удалить") }
                         }
                         if (vm.commentsOpen == p.id) {

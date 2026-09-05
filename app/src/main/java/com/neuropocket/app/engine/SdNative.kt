@@ -32,11 +32,13 @@ object SdNative {
     /** Возвращает RGB-байты (w*h*3) или null. */
     external fun renderImg(
         prompt: String, negative: String, argb: IntArray, iw: Int, ih: Int,
-        w: Int, h: Int, steps: Int, cfg: Float, seed: Long, sampler: String, strength: Float
+        w: Int, h: Int, steps: Int, cfg: Float, seed: Long, sampler: String, strength: Float,
+        hires: Boolean
     ): ByteArray?
 
     external fun render(
         prompt: String, negative: String,
-        w: Int, h: Int, steps: Int, cfg: Float, seed: Long, sampler: String
+        w: Int, h: Int, steps: Int, cfg: Float, seed: Long, sampler: String,
+        hires: Boolean
     ): ByteArray?
 }

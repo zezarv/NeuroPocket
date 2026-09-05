@@ -11,6 +11,15 @@
 
 static sd_ctx_t * g_sd = nullptr;
 static std::mutex g_sd_mu;
+static void apply_hires(sd_img_gen_params_t & gp) {
+    sd_hires_params_init(&gp.hires);
+    gp.hires.enabled = true;
+    gp.hires.upscaler = SD_HIRES_UPSCALER_LATENT;
+    gp.hires.scale = 1.5f;
+    gp.hires.steps = 6;
+    gp.hires.denoising_strength = 0.5f;
+}
+
 
 static std::string jstr(JNIEnv * env, jstring j) {
     if (!j) return std::string();
@@ -73,7 +82,7 @@ JNIEXPORT jbyteArray JNICALL
 Java_com_neuropocket_app_engine_SdNative_render(
         JNIEnv * env, jobject,
         jstring jprompt, jstring jneg,
-        jint w, jint h, jint steps, jfloat cfg, jlong seed, jstring jsampler) {
+        jint w, jint h, jint steps, jfloat cfg, jlong seed, jstring jsampler, jboolean hires) {
     std::string prompt = jstr(env, jprompt);
     std::string neg = jstr(env, jneg);
     std::string sampler = jstr(env, jsampler);
@@ -104,6 +113,7 @@ Java_com_neuropocket_app_engine_SdNative_render(
     }
     gp.seed = (int64_t) seed;
     gp.batch_count = 1;
+    if (hires) { apply_hires(gp); }
 
     sd_image_t * imgs = nullptr;
     int n_imgs = 0;
@@ -140,7 +150,7 @@ Java_com_neuropocket_app_engine_SdNative_renderImg(
         JNIEnv * env, jobject,
         jstring jprompt, jstring jneg,
         jintArray jpx, jint iw, jint ih,
-        jint w, jint h, jint steps, jfloat cfg, jlong seed, jstring jsampler, jfloat strength) {
+        jint w, jint h, jint steps, jfloat cfg, jlong seed, jstring jsampler, jfloat strength, jboolean hires) {
     std::string prompt = jstr(env, jprompt);
     std::string neg = jstr(env, jneg);
     std::string sampler = jstr(env, jsampler);
@@ -193,6 +203,7 @@ Java_com_neuropocket_app_engine_SdNative_renderImg(
     }
     gp.seed = (int64_t) seed;
     gp.batch_count = 1;
+    if (hires) { apply_hires(gp); }
 
     sd_image_t * imgs = nullptr;
     int n_imgs = 0;

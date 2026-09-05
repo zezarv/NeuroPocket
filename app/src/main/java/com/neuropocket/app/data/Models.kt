@@ -18,7 +18,8 @@ data class ChatSession(
     val personaId: String? = null,
     val created: Long = System.currentTimeMillis(),
     var updated: Long = System.currentTimeMillis(),
-    val pinned: Boolean = false
+    val pinned: Boolean = false,
+    val folder: String = ""
 )
 
 @Serializable
