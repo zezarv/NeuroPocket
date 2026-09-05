@@ -1,0 +1,53 @@
+# ===== NeuroPocket .gitignore =====
+# NEVER commit: keys, models, user data, heavy build outputs
+
+# Gradle / Android build outputs
+.gradle/
+.kotlin/
+build/
+app/build/
+app/.cxx/
+local.properties
+*.apk
+*.aab
+*.ap_
+
+# Signing keys — NEVER commit. Release key stays with maintainer.
+*.keystore
+*.jks
+*.keystore.*
+keystore.properties
+
+# Vendored native deps (restored by scripts/setup-deps.ps1, pinned commits)
+app/src/main/cpp/llama.cpp/
+app/src/main/cpp/whisper.cpp/
+app/src/main/cpp/whisper-build/
+app/src/main/cpp/sd.cpp/
+app/src/main/cpp/sd-build/
+app/src/main/cpp/sherpa-onnx/
+# NOTE: app/libs/sherpa_onnx.aar IS committed (built once, 11 MB)
+
+# Model weights / audio / user data — never in git
+*.gguf
+*.bin
+*.safetensors
+*.ckpt
+*.onnx
+*.onnx.json
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.pt
+Neuropocket-backup-*.json
+auto-NeuroPocket-backup-*.json
+persona-*.json
+crash-last.log
+
+# IDE
+.idea/
+*.iml
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini

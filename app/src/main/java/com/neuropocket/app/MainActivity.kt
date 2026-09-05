@@ -1,0 +1,243 @@
+package com.neuropocket.app
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import com.neuropocket.app.ui.*
+import kotlinx.coroutines.launch
+
+class MainActivity : ComponentActivity() {
+    private val vm: AppViewModel by viewModels()
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShare(intent)
+    }
+
+    private fun handleShare(intent: android.content.Intent) {
+        if (intent.action != android.content.Intent.ACTION_SEND) return
+        val type = intent.type ?: return
+        when {
+            type.startsWith("text/") -> {
+                intent.getStringExtra(android.content.Intent.EXTRA_TEXT)?.let { vm.handleSharedText(it) }
+            }
+            type.startsWith("image/") -> {
+                (intent.getParcelableExtra<android.net.Uri>(android.content.Intent.EXTRA_STREAM)
+                    ?: intent.data)?.let { vm.handleSharedImage(it) }
+            }
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        handleShare(intent)
+        setContent {
+            NeuroTheme(theme = vm.theme, accentHex = vm.accent) {
+                var tab by remember { mutableIntStateOf(0) }
+                var hubRoute by remember { mutableStateOf<String?>(null) }
+                var overlay by remember { mutableStateOf<String?>(null) }
+                if (!vm.onboarded) {
+                    OnboardingScreen(
+                        vm,
+                        onOpenModels = { vm.markOnboarded(); overlay = null; hubRoute = null; tab = 4 },
+                        onOpenProviders = { vm.markOnboarded(); overlay = null; hubRoute = "providers"; tab = 0 },
+                        onDone = {}
+                    )
+                    return@NeuroTheme
+                }
+                val drawer = rememberDrawerState(DrawerValue.Closed)
+                val scope = rememberCoroutineScope()
+
+                // Back: сначала overlay, потом маршрут хаба
+                BackHandler(enabled = overlay != null) { overlay = null }
+                BackHandler(enabled = overlay == null && tab == 0 && hubRoute != null) { hubRoute = null }
+
+                // Автожизнь моделей: вход/выход из зон чата и инструментов
+                val zone = when {
+                    overlay?.startsWith("tool:") == true -> "chat"
+                    overlay?.startsWith("pchat:") == true -> "chat"
+                    tab == 1 && overlay == null -> "chat"
+                    tab == 0 && overlay == null &&
+                        (hubRoute == "tools" || hubRoute?.startsWith("tools:") == true) -> "tools"
+                    else -> null
+                }
+                var lastZone by remember { mutableStateOf<String?>(null) }
+                LaunchedEffect(zone) {
+                    val prev = lastZone
+                    lastZone = zone
+                    if (prev != null && prev != zone) vm.onLeaveScreen(prev)
+                    if (zone != null) vm.onEnterScreen(zone)
+                }
+                LaunchedEffect(vm.shareTarget) {
+                    when (vm.consumeShareTarget()) {
+                        "chat" -> { overlay = null; hubRoute = null; tab = 1 }
+                        "tools:vision" -> { overlay = null; hubRoute = "tools:vision"; tab = 0 }
+                    }
+                }
+
+                val items = listOf(
+                    Nav("Хаб", Icons.Default.Dashboard),
+                    Nav("Чаты", Icons.Default.Chat),
+                    Nav("Персоны", Icons.Default.Person),
+                    Nav("Лента", Icons.Default.Home),
+                    Nav("Модели", Icons.Default.CloudDownload)
+                )
+
+                fun openTab(i: Int) { overlay = null; hubRoute = null; tab = i }
+                fun openTool(id: String) { overlay = "tool:$id" }
+                fun openPersona(id: String) { overlay = "persona:$id" }
+                fun openPChat(id: String) { overlay = "pchat:$id" }
+
+                ModalNavigationDrawer(
+                    drawerState = drawer,
+                    gesturesEnabled = overlay == null && (tab == 0 || tab == 1),
+                    drawerContent = {
+                        ModalDrawerSheet {
+                            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("Чаты", style = MaterialTheme.typography.titleLarge,
+                                    fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                IconButton(onClick = {
+                                    vm.newChat(); scope.launch { drawer.close() }; openTab(1)
+                                }) { Icon(Icons.Default.Add, contentDescription = "Новый чат") }
+                            }
+                            HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                val groups = linkedMapOf<String, List<com.neuropocket.app.data.ChatSession>>()
+                                val pinned = vm.sessions.filter { it.pinned }
+                                if (pinned.isNotEmpty()) groups["Закреп"] = pinned
+                                vm.sessions.filter { !it.pinned }.groupBy { sessionDayGroup(it.updated) }
+                                    .forEach { (k, v) -> groups[k] = v }
+                                listOf("Закреп", "Сегодня", "Вчера", "Ранее").forEach { g ->
+                                    val list = groups[g] ?: return@forEach
+                                    item {
+                                        Text(g, style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                                    }
+                                    items(list, key = { it.id }) { s ->
+                                        val sel = s.id == vm.activeSessionId
+                                        NavigationDrawerItem(
+                                            label = { Text(s.title.ifBlank { "Без названия" }, maxLines = 1) },
+                                            selected = sel,
+                                            onClick = {
+                                                vm.openSession(s.id); scope.launch { drawer.close() }
+                                                openTab(1)
+                                            },
+                                            badge = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    IconButton(onClick = { vm.togglePin(s.id) },
+                                                        modifier = Modifier.size(32.dp)) {
+                                                        Icon(Icons.Default.PushPin, contentDescription = "Закрепить",
+                                                            tint = if (s.pinned) MaterialTheme.colorScheme.primary
+                                                            else MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f),
+                                                            modifier = Modifier.size(18.dp))
+                                                    }
+                                                    IconButton(onClick = { vm.deleteSession(s.id) },
+                                                        modifier = Modifier.size(32.dp)) {
+                                                        Icon(Icons.Default.DeleteOutline, contentDescription = "Удалить",
+                                                            modifier = Modifier.size(18.dp))
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.padding(horizontal = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ) {
+                    Scaffold(bottomBar = {
+                        NavigationBar {
+                            items.forEachIndexed { i, n ->
+                                NavigationBarItem(selected = tab == i && overlay == null,
+                                    onClick = { openTab(i) },
+                                    icon = { Icon(n.icon, contentDescription = n.label) },
+                                    label = { Text(n.label) })
+                            }
+                        }
+                    }) { pad ->
+                        Surface(Modifier.padding(pad)) {
+                            // Overlay-экраны поверх всего
+                            val ov = overlay
+                            if (ov != null) {
+                                when {
+                                    ov.startsWith("persona:") -> PersonaDetailScreen(
+                                        vm, ov.removePrefix("persona:"),
+                                        onBack = { overlay = null },
+                                        onOpenChat = { openPChat(it) },
+                                        onEdit = { overlay = "pedit:$it" })
+                                    ov.startsWith("pedit:") -> PersonaEditScreen(
+                                        vm, ov.removePrefix("pedit:"),
+                                        onBack = { overlay = "persona:" + ov.removePrefix("pedit:") })
+                                    ov.startsWith("pchat:") -> PersonaChatScreen(
+                                        vm, ov.removePrefix("pchat:"),
+                                        onBack = { overlay = null })
+                                    ov == "round" -> RoundTableScreen(
+                                        vm,
+                                        onBack = { overlay = null },
+                                        onOpenChats = { overlay = null; openTab(1) })
+                                    ov.startsWith("tool:") -> ToolEnvScreen(
+                                        vm, ov.removePrefix("tool:"),
+                                        onBack = { overlay = null },
+                                        onDiscuss = { overlay = null; openTab(1); vm.discussInChat(it) })
+                                }
+                                return@Surface
+                            }
+                            when (tab) {
+                                0 -> when {
+                                    hubRoute == null -> HubScreen(
+                                        vm,
+                                        onNewChat = { vm.newChat(); tab = 1 },
+                                        onHubRoute = { hubRoute = it },
+                                        onOpenTab = { openTab(it) },
+                                        onOpenSession = { vm.openSession(it); tab = 1 },
+                                        onOpenTool = { openTool(it) },
+                                        onOpenPersona = { openPersona(it) }
+                                    )
+                                    hubRoute == "providers" -> ProvidersScreen(vm,
+                                        onBack = { hubRoute = null })
+                                    hubRoute == "diag" -> DiagScreen(vm,
+                                        onBack = { hubRoute = null })
+                                    hubRoute == "settings" -> SettingsScreen(vm,
+                                        onOpenTab = { openTab(it) },
+                                        onOpenPersonas = { openTab(2) },
+                                        onOpenProviders = { hubRoute = "providers" },
+                                        onOpenDiag = { hubRoute = "diag" })
+                                    else -> ToolsScreen(vm,
+                                        onBack = { hubRoute = null },
+                                        initialCard = hubRoute?.substringAfter(":", "") ?: "",
+                                        onOpenTool = { openTool(it) })
+                                }
+                                1 -> ChatScreen(vm, onMenu = { scope.launch { drawer.open() } })
+                                2 -> PersonasScreen(vm,
+                                    onOpenPersona = { openPersona(it) },
+                                    onOpenChat = { openPChat(it) },
+                                    onOpenRound = { overlay = "round" })
+                                3 -> SocialScreen(vm, onOpenPersona = { openPersona(it) })
+                                else -> ModelsScreen(vm, onOpenProviders = { hubRoute = "providers"; tab = 0 })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    data class Nav(val label: String, val icon: ImageVector)
+}
