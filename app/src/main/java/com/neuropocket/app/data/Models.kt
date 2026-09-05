@@ -68,6 +68,16 @@ data class SocialCharacter(
 )
 
 @Serializable
+data class PostComment(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val postId: String = "",
+    val authorId: String = "",
+    val text: String = "",
+    val ts: Long = System.currentTimeMillis(),
+    val aiMade: Boolean = false
+)
+
+@Serializable
 data class SocialPost(
     val id: String = java.util.UUID.randomUUID().toString(),
     val authorId: String,

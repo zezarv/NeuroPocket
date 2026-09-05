@@ -120,7 +120,18 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                         Spacer(Modifier.height(6.dp))
                         HashtagText(p.text, active = tagFilter) { tagFilter = it }
                         Spacer(Modifier.height(6.dp))
+                        val postComments = remember(vm.comments, p.id) {
+                            vm.comments.filter { it.postId == p.id }.sortedBy { it.ts }
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { vm.toggleComments(p.id) }) {
+                                Icon(Icons.Default.Comment,
+                                    contentDescription = "Комментарии",
+                                    tint = if (vm.commentsOpen == p.id) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.secondary)
+                            }
+                            Text("${postComments.size}")
+                            Spacer(Modifier.width(4.dp))
                             IconButton(onClick = { vm.toggleLike(p.id) }, modifier = Modifier.size(36.dp)) {
                                 Icon(
                                     if (p.liked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
@@ -131,6 +142,51 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                             Text("${p.likes}")
                             Spacer(Modifier.weight(1f))
                             TextButton(onClick = { vm.deletePost(p.id) }) { Text("Удалить") }
+                        }
+                        if (vm.commentsOpen == p.id) {
+                            HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                            postComments.forEach { c ->
+                                val ca = vm.personas.find { it.id == c.authorId }
+                                Row(verticalAlignment = Alignment.Top) {
+                                    if (ca != null) AvatarView(ca.avatarPath, ca.avatarEmoji, 28.dp)
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(ca?.name ?: "?",
+                                                style = MaterialTheme.typography.labelLarge,
+                                                modifier = Modifier.weight(1f))
+                                            if (c.aiMade) {
+                                                Text("ИИ", style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary)
+                                            }
+                                        }
+                                        Text(c.text, style = MaterialTheme.typography.bodySmall)
+                                        Text(timeAgo(c.ts), style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.secondary)
+                                    }
+                                    IconButton(onClick = { vm.deleteComment(c.id) },
+                                        modifier = Modifier.size(28.dp)) {
+                                        Icon(Icons.Default.Close, contentDescription = "Удалить",
+                                            modifier = Modifier.size(14.dp))
+                                    }
+                                }
+                                Spacer(Modifier.height(6.dp))
+                            }
+                            var reply by remember(p.id) { mutableStateOf("") }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(reply, { reply = it },
+                                    label = { Text("Ответить…") },
+                                    modifier = Modifier.weight(1f), singleLine = true)
+                                IconButton(onClick = {
+                                    if (author != null && reply.isNotBlank()) {
+                                        vm.addComment(p.id, author.id, reply)
+                                        reply = ""
+                                    }
+                                }) { Icon(Icons.Default.Send, contentDescription = "Отправить") }
+                            }
+                            TextButton(onClick = {
+                                if (author != null) vm.aiComment(p.id, author.id)
+                            }) { Text("ИИ-ответ от автора") }
                         }
                     }
                 }

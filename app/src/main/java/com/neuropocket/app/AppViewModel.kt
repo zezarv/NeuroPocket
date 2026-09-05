@@ -34,6 +34,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var activePersona by mutableStateOf<Persona?>(null); private set
     var activeModelId by mutableStateOf<String?>(null); private set
     var posts by mutableStateOf(listOf<SocialPost>()); private set
+    var comments by mutableStateOf(listOf<PostComment>()); private set
+    var commentsOpen by mutableStateOf<String?>(null); private set
+    fun toggleComments(postId: String) { commentsOpen = if (commentsOpen == postId) null else postId }
     var theme by mutableStateOf("auto"); private set
     var accent by mutableStateOf("#D9A441"); private set
     var maxTokens by mutableStateOf(256); private set
@@ -53,6 +56,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var autoUnload by mutableStateOf(true); private set
     var autoBackup by mutableStateOf(false); private set
     var autopostHours by mutableStateOf(0); private set
+    var vadSil by mutableStateOf(42); private set
+    var vadMin by mutableStateOf(8000); private set
     var autoFallback by mutableStateOf(true); private set
     var onboarded by mutableStateOf(true); private set
     var benchHistory by mutableStateOf(listOf<String>()); private set
@@ -252,6 +257,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             activeSessionId = asid
             messages = cur
             posts = ps.sortedByDescending { it.ts }
+            comments = Store.loadComments(ctx).sortedBy { it.ts }
+            comments = Store.loadComments(ctx).sortedBy { it.ts }
             toolRuns = toolMap
             pchats = pchatMap
             activeModelId = am
@@ -265,6 +272,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             autoloadSd = Store.getAutoloadSd(ctx); autoUnload = Store.getAutoUnload(ctx)
             autoBackup = Store.getAutoBackup(ctx)
             autopostHours = Store.getAutopost(ctx)
+            vadSil = Store.getVadSil(ctx); vadMin = Store.getVadMin(ctx)
             applyAutopostWork(autopostHours)
             applyAutoBackupWork(autoBackup)
             autoFallback = Store.getAutoFallback(ctx); onboarded = Store.isOnboarded(ctx)
@@ -744,8 +752,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 val floatBuf = FloatArray(512)
                 while (hfRunning) {
                     withContext(Dispatchers.Main) { hfStatus = "Слушаю… (Стоп — выход)" }
-                    val turn = listenTurn(rec, vad, shortBuf, floatBuf) ?: break
-                    if (turn.size < 8000) continue
+                    val turn = listenTurn(rec, vad, shortBuf, floatBuf, vadSil, vadMin) ?: break
+                    if (turn.isEmpty()) continue
                     withContext(Dispatchers.Main) { hfStatus = "Распознаю…" }
                     val tmp = File(ctx.cacheDir, "hf-${System.currentTimeMillis()}.wav")
                     com.neuropocket.app.voice.WavUtils.writeMono16k(tmp, turn)
@@ -784,7 +792,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         rec: android.media.AudioRecord,
         vad: com.k2fsa.sherpa.onnx.Vad,
         shortBuf: ShortArray,
-        floatBuf: FloatArray
+        floatBuf: FloatArray,
+        silenceWin: Int = 42,
+        minSamples: Int = 8000
     ): FloatArray? = withContext(Dispatchers.IO) {
         val out = mutableListOf<Float>()
         var started = false
@@ -804,13 +814,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 for (i in 0 until n) out.add(window[i])
             } else if (started) {
                 for (i in 0 until n) out.add(window[i])
-                if (++silence > 42) break // ~1.4с тишины
+                if (++silence > silenceWin) break
             }
             total += n
         }
         if (!hfRunning) return@withContext null
         if (!started) return@withContext FloatArray(0)
-        out.toFloatArray()
+        val arr = out.toFloatArray()
+        if (arr.size < minSamples) return@withContext FloatArray(0)
+        arr
     }
 
     /** Озвучка через sherpa-голос. Возвращает false если голос не загружен. */
@@ -1219,10 +1231,55 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.Main) { posts = all; status = "Опубликовано." }
     } }
 
+    fun addComment(postId: String, personaId: String, text: String, ai: Boolean = false) {
+        if (text.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val nc = PostComment(postId = postId, authorId = personaId, text = text.take(400), aiMade = ai)
+            val all = (Store.loadComments(ctx) + nc).takeLast(500)
+            Store.saveComments(ctx, all)
+            withContext(Dispatchers.Main) { comments = all.sortedBy { it.ts } }
+        }
+    }
+
+    fun deleteComment(id: String) { viewModelScope.launch(Dispatchers.IO) {
+        val all = Store.loadComments(ctx).filterNot { it.id == id }
+        Store.saveComments(ctx, all)
+        withContext(Dispatchers.Main) { comments = all.sortedBy { it.ts } }
+    } }
+
+    fun aiComment(postId: String, personaId: String) {
+        if (deviceBusy() || pBusy) { status = "Дождись конца генерации."; return }
+        val per = personas.find { it.id == personaId } ?: return
+        val post = posts.find { it.id == postId } ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            withContext(Dispatchers.Main) { status = "Пишу комментарий…" }
+            llama.maxTokens = 160; llama.topP = topP; llama.topK = topK
+            val raw = try {
+                withFallbackEngine(chatEngineFor(per)).generate(
+                    emptyList(), activePersona ?: per,
+                    "Пост в соцсети: «" + post.text.take(400) + "»\n" +
+                        "Напиши 1 короткий живой комментарий от лица «" + per.name + "» " +
+                        "(" + per.desc.ifBlank { per.systemPrompt.take(120) } + "). До 200 символов, без пояснений."
+                )
+            } catch (_: Exception) { "" }
+            val line = raw.lines().map { it.trim() }.firstOrNull { it.length > 3 }?.take(300)
+            if (!line.isNullOrBlank()) {
+                val nc = PostComment(postId = postId, authorId = personaId, text = line, aiMade = true)
+                val all = (Store.loadComments(ctx) + nc).takeLast(500)
+                Store.saveComments(ctx, all)
+                withContext(Dispatchers.Main) { comments = all.sortedBy { it.ts }; status = "Готово." }
+            } else {
+                withContext(Dispatchers.Main) { status = "Не вышло, попробуй ещё." }
+            }
+        }
+    }
+
     fun deletePost(id: String) { viewModelScope.launch(Dispatchers.IO) {
         val all = Store.loadPosts(ctx).filterNot { it.id == id }
         Store.savePosts(ctx, all)
-        withContext(Dispatchers.Main) { posts = all }
+        val nc = Store.loadComments(ctx).filterNot { it.postId == id }
+        Store.saveComments(ctx, nc)
+        withContext(Dispatchers.Main) { posts = all; comments = nc.sortedBy { it.ts } }
     } }
 
     fun aiPost(personaId: String, count: Int = 2) {
@@ -1324,6 +1381,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             status = if (v) "Автобэкап включён (раз в неделю)." else "Автобэкап выключен."
         }
     }
+
+    fun applyVadSil(v: Int) { viewModelScope.launch { Store.setVadSil(ctx, v); vadSil = v } }
+    fun applyVadMin(v: Int) { viewModelScope.launch { Store.setVadMin(ctx, v); vadMin = v } }
 
     fun applyAutopost(h: Int) {
         viewModelScope.launch {
@@ -2192,7 +2252,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             )
             val f = Backup.make(
                 ctx, dump["personas"] ?: "[]", dump["sessions"] ?: "[]", dump["msgmap"] ?: "{}",
-                dump["chars"] ?: "[]", dump["posts"] ?: "[]", dump["providers"] ?: "[]",
+                dump["chars"] ?: "[]", dump["posts"] ?: "[]", dump["comments"] ?: "[]",
+                dump["providers"] ?: "[]",
                 settings, withKeys, password,
                 fullPassword = if (withKeys && password.length >= 4) password else ""
             )
@@ -2212,7 +2273,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val p = Backup.parse(text, password)
             Store.restoreData(ctx, mapOf(
                 "personas" to p.personas, "sessions" to p.sessions, "msgmap" to p.msgmap,
-                "chars" to p.chars, "posts" to p.posts, "providers" to p.providers
+                "chars" to p.chars, "posts" to p.posts, "comments" to p.comments,
+                "providers" to p.providers
             ))
             p.keys.forEach { (id, k) -> KeyVault.put(ctx, id, k) }
             val s = p.settings

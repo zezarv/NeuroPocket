@@ -16,8 +16,8 @@ android {
         applicationId = "com.neuropocket.app"
         minSdk = 28
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.18.0-light"
+        versionCode = 21
+        versionName = "1.19.0-plan3"
 
         vectorDrawables {
             useSupportLibrary = true

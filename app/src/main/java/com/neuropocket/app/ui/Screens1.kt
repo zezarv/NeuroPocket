@@ -387,6 +387,7 @@ fun ToolsScreen(
     LaunchedEffect(vm.pendingVision) {
         vm.consumeVision()?.let { visFile = it }
     }
+    var noteFind by remember { mutableStateOf("") }
     var noteName by remember { mutableStateOf("") }
     var noteText by remember { mutableStateOf("") }
     var ragQ by remember { mutableStateOf("") }
@@ -488,6 +489,18 @@ fun ToolsScreen(
                                 color = MaterialTheme.colorScheme.primary)
                         }
                         Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Пауза: ${(vm.vadSil * 32) / 1000.0}с", style = MaterialTheme.typography.labelSmall)
+                                Slider(value = vm.vadSil.toFloat(), onValueChange = { vm.applyVadSil(it.toInt()) },
+                                    valueRange = 15f..90f, modifier = Modifier.fillMaxWidth())
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text("Мин. речь: ${(vm.vadMin / 16000.0)}с", style = MaterialTheme.typography.labelSmall)
+                                Slider(value = vm.vadMin.toFloat(), onValueChange = { vm.applyVadMin(it.toInt()) },
+                                    valueRange = 4000f..24000f, steps = 4, modifier = Modifier.fillMaxWidth())
+                            }
+                        }
                         if (!vm.hfRunning) {
                             Button(onClick = {
                                 val ok = androidx.core.content.ContextCompat.checkSelfPermission(
@@ -566,10 +579,16 @@ fun ToolsScreen(
                         Text(vm.embedInfo + " • чанков: ${vm.ragIndexed}",
                             style = MaterialTheme.typography.bodySmall)
                         Spacer(Modifier.height(6.dp))
-                        if (vm.noteFiles.isEmpty()) {
-                            Text("Заметок нет — создай первую ниже (.md).", style = MaterialTheme.typography.bodySmall)
+                        OutlinedTextField(noteFind, { noteFind = it }, label = { Text("Найти заметку…") },
+                            modifier = Modifier.fillMaxWidth(), singleLine = true)
+                        val shownNotes = remember(vm.noteFiles, noteFind) {
+                            if (noteFind.isBlank()) vm.noteFiles
+                            else vm.noteFiles.filter { it.contains(noteFind, true) }
                         }
-                        vm.noteFiles.take(10).forEach { n ->
+                        if (shownNotes.isEmpty()) {
+                            Text("Ничего нет — создай ниже (.md).", style = MaterialTheme.typography.bodySmall)
+                        }
+                        shownNotes.take(20).forEach { n ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text("• $n", modifier = Modifier.weight(1f),
                                     style = MaterialTheme.typography.bodySmall)

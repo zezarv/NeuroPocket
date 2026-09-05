@@ -24,6 +24,7 @@ object Store {
     private val KEY_ACCENT = stringPreferencesKey("accent") // hex
     private val KEY_CHARS = stringPreferencesKey("chars_json")
     private val KEY_POSTS = stringPreferencesKey("posts_json")
+    private val KEY_COMMENTS = stringPreferencesKey("comments_json")
     private val KEY_MAXTOK = intPreferencesKey("max_tokens")
     private val KEY_TOPP = floatPreferencesKey("top_p")
     private val KEY_TOPK = intPreferencesKey("top_k")
@@ -41,6 +42,8 @@ object Store {
     private val KEY_AUTOLOAD_SD = booleanPreferencesKey("autoload_sd")
     private val KEY_AUTOUNLOAD = booleanPreferencesKey("auto_unload")
     private val KEY_AUTOBK = booleanPreferencesKey("auto_backup")
+    private val KEY_VADSIL = intPreferencesKey("vad_silence")
+    private val KEY_VADMIN = intPreferencesKey("vad_min")
     private val KEY_AUTOPOST = intPreferencesKey("autopost_hours")
     private val KEY_AUTOFB = booleanPreferencesKey("auto_fallback")
     private val KEY_ONBOARD = booleanPreferencesKey("onboarded")
@@ -112,6 +115,12 @@ object Store {
         return try { json.decodeFromString<List<SocialPost>>(raw).toMutableList() } catch (_: Exception) { mutableListOf() }
     }
     suspend fun savePosts(ctx: Context, v: List<SocialPost>) { ctx.ds.edit { it[KEY_POSTS] = json.encodeToString(v.takeLast(300)) } }
+    suspend fun loadComments(ctx: Context): MutableList<PostComment> {
+        val raw = ctx.ds.data.map { it[KEY_COMMENTS] }.first()
+        if (raw.isNullOrBlank()) return mutableListOf()
+        return try { json.decodeFromString<List<PostComment>>(raw).toMutableList() } catch (_: Exception) { mutableListOf() }
+    }
+    suspend fun saveComments(ctx: Context, v: List<PostComment>) { ctx.ds.edit { it[KEY_COMMENTS] = json.encodeToString(v.takeLast(500)) } }
 
     suspend fun getActiveModel(ctx: Context): String? = ctx.ds.data.map { it[KEY_ACTIVE_MODEL] }.first()
     suspend fun setActiveModel(ctx: Context, id: String) { ctx.ds.edit { it[KEY_ACTIVE_MODEL] = id } }
@@ -153,6 +162,10 @@ object Store {
     suspend fun setAutoloadSd(ctx: Context, v: Boolean) { ctx.ds.edit { it[KEY_AUTOLOAD_SD] = v } }
     suspend fun getAutoUnload(ctx: Context): Boolean = ctx.ds.data.map { it[KEY_AUTOUNLOAD] ?: true }.first()
     suspend fun getAutoBackup(ctx: Context): Boolean = ctx.ds.data.map { it[KEY_AUTOBK] ?: false }.first()
+    suspend fun getVadSil(ctx: Context): Int = ctx.ds.data.map { it[KEY_VADSIL] ?: 42 }.first()
+    suspend fun setVadSil(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_VADSIL] = v } }
+    suspend fun getVadMin(ctx: Context): Int = ctx.ds.data.map { it[KEY_VADMIN] ?: 8000 }.first()
+    suspend fun setVadMin(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_VADMIN] = v } }
     suspend fun getAutopost(ctx: Context): Int = ctx.ds.data.map { it[KEY_AUTOPOST] ?: 0 }.first()
     suspend fun setAutopost(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_AUTOPOST] = v } }
     suspend fun setAutoBackup(ctx: Context, v: Boolean) { ctx.ds.edit { it[KEY_AUTOBK] = v } }
@@ -223,6 +236,7 @@ object Store {
             "msgmap" to (d[KEY_MSGMAP] ?: "{}"),
             "chars" to (d[KEY_CHARS] ?: "[]"),
             "posts" to (d[KEY_POSTS] ?: "[]"),
+            "comments" to (d[KEY_COMMENTS] ?: "[]"),
             "providers" to provClean
         )
     }
@@ -234,6 +248,7 @@ object Store {
             m["msgmap"]?.let { v -> it[KEY_MSGMAP] = v }
             m["chars"]?.let { v -> it[KEY_CHARS] = v }
             m["posts"]?.let { v -> it[KEY_POSTS] = v }
+            m["comments"]?.let { v -> it[KEY_COMMENTS] = v }
             m["providers"]?.let { v -> it[KEY_PROVIDERS] = v }
         }
     }

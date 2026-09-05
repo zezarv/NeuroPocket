@@ -54,6 +54,7 @@ object Backup {
         msgmap: String,
         chars: String,
         posts: String,
+        comments: String,
         providers: String,
         settings: Map<String, Any>,
         withKeys: Boolean,
@@ -69,6 +70,7 @@ object Backup {
         data.put("msgmap", msgmap)
         data.put("chars", chars)
         data.put("posts", posts)
+        data.put("comments", comments)
         data.put("providers", providers)
         val st = JSONObject()
         settings.forEach { (k, v) -> st.put(k, v) }
@@ -109,7 +111,7 @@ object Backup {
 
     data class Parsed(
         val personas: String, val sessions: String, val msgmap: String,
-        val chars: String, val posts: String, val providers: String,
+        val chars: String, val posts: String, val comments: String, val providers: String,
         val settings: Map<String, String>, val keys: Map<String, String>
     )
 
@@ -145,7 +147,8 @@ object Backup {
         return Parsed(
             data.optString("personas", "[]"), data.optString("sessions", "[]"),
             data.optString("msgmap", "{}"), data.optString("chars", "[]"),
-            data.optString("posts", "[]"), data.optString("providers", "[]"),
+            data.optString("posts", "[]"), data.optString("comments", "[]"),
+            data.optString("providers", "[]"),
             st, keys
         )
     }

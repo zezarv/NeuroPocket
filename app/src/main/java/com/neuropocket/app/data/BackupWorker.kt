@@ -32,7 +32,8 @@ class BackupWorker(appCtx: Context, params: WorkerParameters) : CoroutineWorker(
             val f = Backup.make(
                 applicationContext,
                 dump["personas"] ?: "[]", dump["sessions"] ?: "[]", dump["msgmap"] ?: "{}",
-                dump["chars"] ?: "[]", dump["posts"] ?: "[]", dump["providers"] ?: "[]",
+                dump["chars"] ?: "[]", dump["posts"] ?: "[]", dump["comments"] ?: "[]",
+                dump["providers"] ?: "[]",
                 settings, false, ""
             )
             val auto = File(f.parent, "auto-" + f.name)
