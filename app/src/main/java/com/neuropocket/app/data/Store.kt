@@ -266,7 +266,10 @@ object Store {
             "chars" to (d[KEY_CHARS] ?: "[]"),
             "posts" to (d[KEY_POSTS] ?: "[]"),
             "comments" to (d[KEY_COMMENTS] ?: "[]"),
-            "providers" to provClean
+            "providers" to provClean,
+            // Phase B: истории инструментов и чатов персон тоже бэкапятся.
+            "toolmap" to (d[KEY_TOOLMAP] ?: "{}"),
+            "pchatmap" to (d[KEY_PCHATMAP] ?: "{}")
         )
     }
 
@@ -279,6 +282,8 @@ object Store {
             m["posts"]?.let { v -> it[KEY_POSTS] = v }
             m["comments"]?.let { v -> it[KEY_COMMENTS] = v }
             m["providers"]?.let { v -> it[KEY_PROVIDERS] = v }
+            m["toolmap"]?.let { v -> it[KEY_TOOLMAP] = v }
+            m["pchatmap"]?.let { v -> it[KEY_PCHATMAP] = v }
         }
     }
 }

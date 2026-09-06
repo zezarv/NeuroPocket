@@ -1630,6 +1630,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toolHistory(id: String): List<ToolRun> = toolRuns[id] ?: emptyList()
 
+    /** Недавние инструменты (id→title) по времени последнего запуска. */
+    fun recentTools(n: Int = 4): List<Pair<String, String>> {
+        return try {
+            toolRuns.mapNotNull { (id, runs) ->
+                val last = runs.maxOfOrNull { it.ts } ?: return@mapNotNull null
+                val title = com.neuropocket.app.data.ToolCatalog.byId(id)?.title ?: id
+                Triple(id, title, last)
+            }.sortedByDescending { it.third }.take(n).map { it.first to it.second }
+        } catch (_: Exception) { emptyList() }
+    }
+
     fun runTool(
         toolId: String, input: String, langFrom: String = "", langTo: String = "",
         mode: String = "", extra: String = "",
@@ -3889,7 +3900,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 dump["chars"] ?: "[]", dump["posts"] ?: "[]", dump["comments"] ?: "[]",
                 dump["providers"] ?: "[]",
                 settings, withKeys, password,
-                fullPassword = if (withKeys && password.length >= 4) password else ""
+                fullPassword = if (withKeys && password.length >= 4) password else "",
+                toolmap = dump["toolmap"] ?: "{}",
+                pchatmap = dump["pchatmap"] ?: "{}"
             )
             NpLog.i("backup", "saved " + f.name)
             withContext(Dispatchers.Main) {
@@ -3908,7 +3921,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             Store.restoreData(ctx, mapOf(
                 "personas" to p.personas, "sessions" to p.sessions, "msgmap" to p.msgmap,
                 "chars" to p.chars, "posts" to p.posts, "comments" to p.comments,
-                "providers" to p.providers
+                "providers" to p.providers,
+                "toolmap" to p.toolmap, "pchatmap" to p.pchatmap
             ))
             p.keys.forEach { (id, k) -> KeyVault.put(ctx, id, k) }
             val s = p.settings

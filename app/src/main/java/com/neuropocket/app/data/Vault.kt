@@ -69,7 +69,10 @@ object Backup {
         providers: String,
         settings: Map<String, Any>,
         keysJson: String?,
-        keysPassword: String
+        keysPassword: String,
+        // Phase B: истории инструментов и чатов персон (дефолты = старые бэкапы читаются).
+        toolmap: String = "{}",
+        pchatmap: String = "{}"
     ): JSONObject {
         val root = JSONObject()
         root.put("app", "NeuroPocket")
@@ -82,6 +85,8 @@ object Backup {
         data.put("posts", posts)
         data.put("comments", comments)
         data.put("providers", providers)
+        data.put("toolmap", toolmap)
+        data.put("pchatmap", pchatmap)
         // P0.4: новый корректный формат — settings как JSONObject (не String).
         // Старые бэкапы со String(JSON) читаем в parse() для backward compat.
         data.put("settings", com.neuropocket.app.core.BackupSettings.encode(settings))
@@ -119,7 +124,9 @@ object Backup {
         settings: Map<String, Any>,
         withKeys: Boolean,
         password: String,
-        fullPassword: String = ""
+        fullPassword: String = "",
+        toolmap: String = "{}",
+        pchatmap: String = "{}"
     ): File {
         var keysJson: String? = null
         if (withKeys && password.length >= 4) {
@@ -134,7 +141,7 @@ object Backup {
         }
         val root = buildPlainRoot(
             personas, sessions, msgmap, chars, posts, comments, providers,
-            settings, keysJson, password
+            settings, keysJson, password, toolmap, pchatmap
         )
         if (fullPassword.length >= 4) {
             // шифруем ВЕСЬ бэкап целиком (включая ключи, если их добавили выше)
@@ -151,7 +158,8 @@ object Backup {
     data class Parsed(
         val personas: String, val sessions: String, val msgmap: String,
         val chars: String, val posts: String, val comments: String, val providers: String,
-        val settings: Map<String, String>, val keys: Map<String, String>
+        val settings: Map<String, String>, val keys: Map<String, String>,
+        val toolmap: String = "{}", val pchatmap: String = "{}"
     )
 
     fun parse(text: String, password: String): Parsed {
@@ -190,7 +198,8 @@ object Backup {
             data.optString("msgmap", "{}"), data.optString("chars", "[]"),
             data.optString("posts", "[]"), data.optString("comments", "[]"),
             data.optString("providers", "[]"),
-            st, keys
+            st, keys,
+            data.optString("toolmap", "{}"), data.optString("pchatmap", "{}")
         )
     }
 }

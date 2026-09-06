@@ -420,6 +420,10 @@ fun ToolsScreen(
 ) {
     var box by remember { mutableStateOf("") }
     var agentTask by remember { mutableStateOf("") }
+    // Phase B: простая навигация — поиск, категории, недавние.
+    var toolSearch by remember { mutableStateOf("") }
+    var toolCat by remember { mutableStateOf("Все") }
+    val toolScope = rememberCoroutineScope()
     var photoPrompt by remember { mutableStateOf("") }
     var photoNeg by remember { mutableStateOf("blurry, low quality, watermark") }
     var photoSteps by remember { mutableStateOf("6") }
@@ -514,10 +518,10 @@ fun ToolsScreen(
         val listState = rememberLazyListState()
         LaunchedEffect(initialCard) {
             val idx = when (initialCard) {
-                "voice" -> 0
-                "vision" -> 1
-                "rag" -> 2
-                "transcriber" -> 3
+                "voice" -> 1
+                "vision" -> 2
+                "rag" -> 3
+                "transcriber" -> 4
                 "agent" -> 5
                 "photo" -> 6
                 "sandbox" -> 7
@@ -526,6 +530,15 @@ fun ToolsScreen(
             if (idx >= 0) listState.scrollToItem(idx)
         }
         LazyColumn(state = listState, modifier = Modifier.fillMaxSize().padding(pad).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                ToolsNavCard(
+                    search = toolSearch, onSearch = { toolSearch = it },
+                    cat = toolCat, onCat = { toolCat = it },
+                    recent = vm.recentTools(4),
+                    onOpenTool = onOpenTool,
+                    onJump = { idx -> toolScope.launch { try { listState.scrollToItem(idx) } catch (_: Exception) { } } }
+                )
+            }
             item {
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
@@ -1020,19 +1033,33 @@ fun ToolsScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.secondary)
                         Spacer(Modifier.height(8.dp))
-                        com.neuropocket.app.data.ToolCatalog.textTools.forEach { t ->
-                            val n = vm.toolHistory(t.id).size
-                            OutlinedButton(
-                                onClick = { onOpenTool(t.id) },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text("${t.title}" + if (n > 0) " ($n)" else "")
+                        val q = toolSearch.trim().lowercase()
+                        com.neuropocket.app.data.ToolCatalog.textTools
+                            .filter { t ->
+                                val catOk = toolCat == "Все" ||
+                                    (if (t.id == "vibecode") "Разработчик" else "AI Текст") == toolCat
+                                val qOk = q.isBlank() ||
+                                    t.title.lowercase().contains(q) || t.hint.lowercase().contains(q)
+                                catOk && qOk
                             }
-                            Spacer(Modifier.height(4.dp))
+                            .forEach { t ->
+                                val n = vm.toolHistory(t.id).size
+                                OutlinedButton(
+                                    onClick = { onOpenTool(t.id) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("${t.title}" + if (n > 0) " ($n)" else "")
+                                }
+                                Spacer(Modifier.height(4.dp))
+                            }
+                        if (toolCat == "Все" || toolCat == "Утилиты") {
+                            if (q.isBlank() || "утилит".contains(q) || "калькулятор".contains(q) || "json".contains(q)) {
+                                OutlinedButton(onClick = onOpenUtils, modifier = Modifier.fillMaxWidth()) { Text("Утилиты: калькулятор, JSON, Base64…") }
+                                Spacer(Modifier.height(4.dp))
+                            }
                         }
-                        Button(onClick = { agentTask = box }, modifier = Modifier.fillMaxWidth()) { Text("Отправить задачу агенту ↑") }
                         Spacer(Modifier.height(6.dp))
-                        OutlinedButton(onClick = onOpenUtils, modifier = Modifier.fillMaxWidth()) { Text("Утилиты: калькулятор, JSON, Base64…") }
+                        Button(onClick = { agentTask = box }, modifier = Modifier.fillMaxWidth()) { Text("Отправить задачу агенту ↑") }
                         Spacer(Modifier.height(6.dp))
                         OutlinedTextField(box, { box = it }, label = { Text("Быстрая задача агенту…") },
                             modifier = Modifier.fillMaxWidth(), minLines = 2)
@@ -1057,5 +1084,53 @@ fun ToolsScreen(
             },
             dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Отмена") } }
         )
+    }
+}
+
+/** Phase B: простая навигация по инструментам — поиск, категории, недавние, разделы. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ToolsNavCard(
+    search: String,
+    onSearch: (String) -> Unit,
+    cat: String,
+    onCat: (String) -> Unit,
+    recent: List<Pair<String, String>>,
+    onOpenTool: (String) -> Unit,
+    onJump: (Int) -> Unit
+) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Text("Быстрый доступ", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(search, onSearch, label = { Text("Найти инструмент…") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                modifier = Modifier.fillMaxWidth(), singleLine = true)
+            Spacer(Modifier.height(6.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("Все", "AI Текст", "Разработчик", "Утилиты").forEach { c ->
+                    FilterChip(selected = cat == c, onClick = { onCat(c) }, label = { Text(c) })
+                }
+            }
+            if (recent.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Text("Недавние:", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    recent.forEach { (id, title) ->
+                        AssistChip(onClick = { onOpenTool(id) }, label = { Text(title) })
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text("Разделы:", style = MaterialTheme.typography.labelMedium)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(
+                    "Голос" to 1, "Зрение" to 2, "Память" to 3,
+                    "Аудио" to 4, "Агент" to 5, "Фото" to 6, "Текст" to 7
+                ).forEach { (t, idx) ->
+                    AssistChip(onClick = { onJump(idx) }, label = { Text(t) })
+                }
+            }
+        }
     }
 }
