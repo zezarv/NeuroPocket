@@ -1037,7 +1037,7 @@ fun ToolsScreen(
                 Text(
                     "Имя: ${f.name}\n" +
                         "Размер: ${vm.displaySizeMb(f)} МБ\n" +
-                        "Тип: ${com.neuropocket.app.core.ModelRoles.describeFile(f.name)}"
+                        "Тип: ${com.neuropocket.app.core.ModelRoles.labelRu(vm.roleForFile(f))}"
                 )
             },
             confirmButton = {

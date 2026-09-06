@@ -366,7 +366,8 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                 vm.modelFiles.forEach { f ->
                     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(10.dp)) {
-                            val role = remember(f.name) { com.neuropocket.app.core.ModelRoles.classify(f.name) }
+                            // Lead-review #2 п.6A: та же authoritative роль, что в loading.
+                            val role = remember(f.name) { vm.roleForFile(f) }
                             Text("• ${f.name} (${f.length() / 1048576} МБ)", style = MaterialTheme.typography.bodySmall)
                             Text(com.neuropocket.app.core.ModelRoles.labelRu(role),
                                 style = MaterialTheme.typography.labelSmall,
@@ -613,7 +614,7 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                 Text(
                     "Имя: ${f.name}\n" +
                         "Размер: $sizeMb МБ\n" +
-                        "Тип: ${com.neuropocket.app.core.ModelRoles.describeFile(f.name)}$loadedMark"
+                        "Тип: ${com.neuropocket.app.core.ModelRoles.labelRu(vm.roleForFile(f))}$loadedMark"
                 )
             },
             confirmButton = {

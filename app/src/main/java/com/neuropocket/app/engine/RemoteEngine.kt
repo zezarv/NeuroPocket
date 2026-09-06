@@ -53,13 +53,23 @@ class RemoteEngine(
             val loc = resp.header("Location")
             resp.close()
             val from = req.url.toString()
-            when (val d = com.neuropocket.app.core.RedirectPolicy.check(from, loc)) {
-                is com.neuropocket.app.core.RedirectPolicy.Decision.Block ->
-                    throw Exception("redirect заблокирован: ${d.reason.take(160)}")
-                is com.neuropocket.app.core.RedirectPolicy.Decision.Allow -> {
-                    val nb = Request.Builder().url(d.url)
+            // Lead-review #2 п.3: credential policy — чужому origin секреты не несём.
+            when (val f = com.neuropocket.app.core.RedirectPolicy.decideFollow(from, loc, isPost)) {
+                is com.neuropocket.app.core.RedirectPolicy.Follow.Block ->
+                    throw Exception("redirect заблокирован: ${f.reason.take(160)}")
+                is com.neuropocket.app.core.RedirectPolicy.Follow.KeepHeaders,
+                is com.neuropocket.app.core.RedirectPolicy.Follow.Stripped -> {
+                    val target = when (f) {
+                        is com.neuropocket.app.core.RedirectPolicy.Follow.KeepHeaders -> f.url
+                        is com.neuropocket.app.core.RedirectPolicy.Follow.Stripped -> f.url
+                        else -> throw Exception("redirect заблокирован")
+                    }
+                    val strip = f is com.neuropocket.app.core.RedirectPolicy.Follow.Stripped
+                    val nb = Request.Builder().url(target)
                     for (i in 0 until req.headers.size) {
-                        nb.header(req.headers.name(i), req.headers.value(i))
+                        val hn = req.headers.name(i)
+                        if (strip && com.neuropocket.app.core.RedirectPolicy.isSensitiveHeader(hn)) continue
+                        nb.header(hn, req.headers.value(i))
                     }
                     nb.method(req.method, req.body)
                     req = nb.build()
@@ -245,13 +255,23 @@ class RemoteEngine(
                     val loc = resp.header("Location")
                     val from = req.url.toString()
                     resp.close()
-                    when (val d = com.neuropocket.app.core.RedirectPolicy.check(from, loc)) {
-                        is com.neuropocket.app.core.RedirectPolicy.Decision.Block ->
-                            throw Exception("redirect заблокирован: ${d.reason.take(160)}")
-                        is com.neuropocket.app.core.RedirectPolicy.Decision.Allow -> {
-                            val nb = Request.Builder().url(d.url)
+                    // Lead-review #2 п.3: GET без body — чужому origin без секретов.
+                    when (val f = com.neuropocket.app.core.RedirectPolicy.decideFollow(from, loc, isPost = false)) {
+                        is com.neuropocket.app.core.RedirectPolicy.Follow.Block ->
+                            throw Exception("redirect заблокирован: ${f.reason.take(160)}")
+                        is com.neuropocket.app.core.RedirectPolicy.Follow.KeepHeaders,
+                        is com.neuropocket.app.core.RedirectPolicy.Follow.Stripped -> {
+                            val target = when (f) {
+                                is com.neuropocket.app.core.RedirectPolicy.Follow.KeepHeaders -> f.url
+                                is com.neuropocket.app.core.RedirectPolicy.Follow.Stripped -> f.url
+                                else -> throw Exception("redirect заблокирован")
+                            }
+                            val strip = f is com.neuropocket.app.core.RedirectPolicy.Follow.Stripped
+                            val nb = Request.Builder().url(target)
                             for (i in 0 until req.headers.size) {
-                                nb.header(req.headers.name(i), req.headers.value(i))
+                                val hn = req.headers.name(i)
+                                if (strip && com.neuropocket.app.core.RedirectPolicy.isSensitiveHeader(hn)) continue
+                                nb.header(hn, req.headers.value(i))
                             }
                             req = nb.get().build()
                             hops++

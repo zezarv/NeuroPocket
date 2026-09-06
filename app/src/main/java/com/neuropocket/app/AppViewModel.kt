@@ -597,18 +597,28 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Red-team B/D: повтор после ERROR (сбрасывает состояние и ищет asset заново). */
+    /**
+     * Red-team B/D + lead-review #2 п.5: повтор после ERROR.
+     * UI onClick только выставляет MISSING; probe/hash/load (refresh ->
+     * System.load) идут на Dispatchers.IO. На Main — только enum/status.
+     */
     fun retryVoiceEngine() {
         voiceEngineState = com.neuropocket.app.core.VoiceEngine.next(
             voiceEngineState, com.neuropocket.app.core.EngineEvent.RETRY
         )
         voiceEngineError = null
-        try { refreshVoiceEngineState() } catch (_: Exception) {
-            voiceEngineState = com.neuropocket.app.core.VoiceEngineState.MISSING
-        }
-        if (voiceEngineState == com.neuropocket.app.core.VoiceEngineState.MISSING) {
-            voiceEngineUrl = null
-            resolveVoiceEngineUrl()
+        viewModelScope.launch(Dispatchers.IO) {
+            try { refreshVoiceEngineState() } catch (_: Exception) {
+                withContext(Dispatchers.Main) {
+                    voiceEngineState = com.neuropocket.app.core.VoiceEngineState.MISSING
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (voiceEngineState == com.neuropocket.app.core.VoiceEngineState.MISSING) {
+                    voiceEngineUrl = null
+                    resolveVoiceEngineUrl()
+                }
+            }
         }
     }
 
@@ -914,7 +924,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     if (rtCancel) break@outer
                     val prompt = "Круглый стол на тему: ${topic.take(400)}\n" +
                         "Участники: ${parts.joinToString { it.name }}.\n" +
-                        (if (acc.isEmpty()) "Ты начинаешь обсуждение." else "Ход дискуссии:\n${acc.toString().take(2000)}\n") +
+                        // Lead-review #2 п.1: каждый turn — СВЕЖИЙ tail (не take с начала).
+                        (if (acc.isEmpty()) "Ты начинаешь обсуждение." else "Ход дискуссии:\n${com.neuropocket.app.core.RoundTableLogic.tail(acc.toString())}\n") +
                         "Ответь как ${per.name} (${per.desc.ifBlank { per.systemPrompt.take(150) }}): " +
                         "коротко (2–4 предложения), реагируй на сказанное, не повторяйся."
                     val eng = withFallbackEngine(chatEngineFor(per))
@@ -1082,7 +1093,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         com.neuropocket.app.core.RagUtils.cosine(a, b)
 
     fun askNotes(q: String) {
-        if (q.isBlank() || ragBusy) return
+        // Lead-review #2 п.2: RAG использует shared llama — проверяем стол.
+        if (!com.neuropocket.app.core.SharedLlmGate.canAskNotes(q.isBlank(), ragBusy, rtRunning)) return
         if (!embedLoaded) { status = "Сначала вектора в RAM."; return }
         stopSpeak()
         ragBusy = true
@@ -1138,6 +1150,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Голосовой чат: слушаю (VAD) → whisper → движок → sherpa-голос, по кругу. */
     fun startHandsFree() {
         if (hfRunning) return
+        // Lead-review #2 п.2: столу нельзя мешать захватом pipeline.
+        if (!com.neuropocket.app.core.SharedLlmGate.canStartHandsFree(rtRunning)) {
+            status = "Дождись конца круглого стола."
+            return
+        }
         val p = activePersona ?: return
         if (!WhisperNative.available || !whisperLoaded) { status = "Сначала whisper в RAM."; return }
         if (sherpa == null) { status = "Сначала голос в RAM (Модели → Голоса)."; return }
@@ -1379,10 +1396,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun send(userText: String, onStream: (String) -> Unit = {}) {
         val p = activePersona ?: return
-        if (userText.isBlank() || busy || agentRunning || pBusy || sdBusy || visionBusy) {
+        // Lead-review #2 п.2: единый gate (включает rtRunning). Hands-free
+        // идёт через тот же send: во время стола виток безопасно пропускается.
+        if (!com.neuropocket.app.core.SharedLlmGate.canSend(busy, agentRunning, pBusy, sdBusy, visionBusy, rtRunning)) {
             if (userText.isNotBlank()) status = "Дождись конца текущей задачи."
             onStream(""); return
         }
+        if (userText.isBlank()) { onStream(""); return }
         stopSpeak()
         busy = true
         NpLog.d("chat", "send (" + chatEngine().engineName + "): " + userText.take(80))
@@ -1539,7 +1559,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun personaMessages(id: String): List<ChatMessage> = pchats[id] ?: emptyList()
 
     fun sendPersona(persona: Persona, userText: String, onDone: (String) -> Unit = {}) {
-        if (userText.isBlank() || pBusy || busy || agentRunning || sdBusy || visionBusy) { onDone(""); return }
+        if (userText.isBlank() ||
+            !com.neuropocket.app.core.SharedLlmGate.canSendPersona(busy, agentRunning, pBusy, sdBusy, visionBusy, rtRunning)
+        ) { onDone(""); return }
         stopSpeak()
         pBusy = true
         viewModelScope.launch(Dispatchers.IO) {
@@ -1909,7 +1931,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun runAgent(task: String) {
         val p = activePersona ?: return
-        if (task.isBlank() || agentRunning || busy || sdBusy) return
+        if (!com.neuropocket.app.core.SharedLlmGate.canRunAgent(task.isBlank(), agentRunning, busy, sdBusy, rtRunning)) return
         agentRunning = true
         agentCancel = false
         agentSteps = emptyList()
@@ -2028,6 +2050,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     data class DlInfo(val fileName: String, val text: String, val progress: Float, val done: Boolean, val failed: Boolean)
     var downloads by mutableStateOf(mapOf<Long, DlInfo>()); private set
+    // Lead-review #2 п.4: terminal ids (failed/missing-row) — не query каждую секунду.
+    private var dlTerminal = setOf<Long>()
     private var dlPolling = false
 
     fun dlFor(fileName: String): DlInfo? = downloads.values.find { it.fileName == fileName && !it.done }
@@ -2043,21 +2067,25 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             dm.remove(id)
         } catch (_: Exception) { }
         downloads = downloads - id
+        dlTerminal = com.neuropocket.app.core.DlPollPolicy.unmarkTerminal(dlTerminal, id)
+        // Lead-review #2 п.5: тяжёлый refresh (System.load) — на IO, не на Main.
         if (fn == "voice-engine-arm64.zip") {
             voiceEngineState = com.neuropocket.app.core.VoiceEngine.next(
                 voiceEngineState, com.neuropocket.app.core.EngineEvent.DOWNLOAD_CANCELLED
             )
-            try { refreshVoiceEngineState() } catch (_: Exception) { }
-            // refresh не затирает transients; после cancel transients нет —
-            // но если файлы уже были, refresh вернёт READY/ERROR честно
             status = "Загрузка отменена."
+            viewModelScope.launch(Dispatchers.IO) {
+                try { refreshVoiceEngineState() } catch (_: Exception) { }
+            }
         }
         if (fn == "libnpsd.so") {
             sdEngineState = com.neuropocket.app.core.SdEngine.next(
                 sdEngineState, com.neuropocket.app.core.EngineEvent.DOWNLOAD_CANCELLED
             )
-            try { refreshSdEngineState() } catch (_: Exception) { }
             status = "Загрузка отменена."
+            viewModelScope.launch(Dispatchers.IO) {
+                try { refreshSdEngineState() } catch (_: Exception) { }
+            }
         }
     }
 
@@ -2066,22 +2094,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      * engine state пересчитывается (FAILED строка уже выставила ERROR в poll).
      */
     fun dismissDownload(id: Long) {
-        val wasFailed = downloads[id]?.failed == true
-        val fn = downloads[id]?.fileName
         downloads = downloads - id
-        if (wasFailed && fn == "voice-engine-arm64.zip" &&
-            voiceEngineState == com.neuropocket.app.core.VoiceEngineState.DOWNLOADING
-        ) {
-            // poll уже выставил ERROR; страховка на случай гонки
-            voiceEngineState = com.neuropocket.app.core.VoiceEngineState.ERROR
-            if (voiceEngineError == null) voiceEngineError = "загрузка не удалась."
-        }
-        if (wasFailed && fn == "libnpsd.so" &&
-            sdEngineState == com.neuropocket.app.core.SdEngineState.DOWNLOADING
-        ) {
-            sdEngineState = com.neuropocket.app.core.SdEngineState.ERROR
-            if (sdEngineError == null) sdEngineError = "загрузка не удалась."
-        }
+        dlTerminal = com.neuropocket.app.core.DlPollPolicy.unmarkTerminal(dlTerminal, id)
+        // (failed-engine ERROR остаётся до Retry — dismiss строки его не стирает)
     }
 
     private fun startDlPoll() {
@@ -2095,13 +2110,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 if (ids.isEmpty()) { dlPolling = false; return@launch }
                 var needScan = false
                 val upd = mutableMapOf<Long, DlInfo>()
+                // Lead-review #2 п.4: terminal ids не query (снимок с Main).
+                val terminal = withContext(Dispatchers.Main) { dlTerminal }
                 for (id in ids) {
                     val cur = withContext(Dispatchers.Main) { downloads[id] } ?: continue
-                    if (cur.done) continue
+                    // Lead-review #2 п.4: failed/done/terminal — пропуск query.
+                    // Failed-строка остаётся в UI для dismiss, но не опрашивается.
+                    if (!com.neuropocket.app.core.DlPollPolicy.shouldQuery(cur.done, cur.failed, id in terminal)) continue
                     try {
                         dm.query(DownloadManager.Query().setFilterById(id))?.use { c ->
                             if (!c.moveToFirst()) {
+                                // Lead-review #2 п.4: missing row = terminal.
                                 upd[id] = cur.copy(text = "нет в очереди", failed = true)
+                                withContext(Dispatchers.Main) {
+                                    dlTerminal = com.neuropocket.app.core.DlPollPolicy.markTerminal(dlTerminal, id)
+                                    val ev = com.neuropocket.app.core.DlPollPolicy.engineEventForMissingRow(cur.fileName)
+                                    if (ev == com.neuropocket.app.core.EngineEvent.DOWNLOAD_FAILED) {
+                                        if (cur.fileName == com.neuropocket.app.core.DlPollPolicy.VOICE_LABEL &&
+                                            voiceEngineState == com.neuropocket.app.core.VoiceEngineState.DOWNLOADING
+                                        ) {
+                                            voiceEngineState = com.neuropocket.app.core.VoiceEngineState.ERROR
+                                            voiceEngineError = "загрузка пропала из очереди."
+                                            status = "Загрузка движка пропала из очереди."
+                                        }
+                                        if (cur.fileName == com.neuropocket.app.core.DlPollPolicy.SD_LABEL &&
+                                            sdEngineState == com.neuropocket.app.core.SdEngineState.DOWNLOADING
+                                        ) {
+                                            sdEngineState = com.neuropocket.app.core.SdEngineState.ERROR
+                                            sdEngineError = "загрузка пропала из очереди."
+                                            status = "Загрузка SD движка пропала из очереди."
+                                        }
+                                    }
+                                }
                                 return@use
                             }
                             val stIdx = c.getColumnIndex(DownloadManager.COLUMN_STATUS)
@@ -2157,6 +2197,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 withContext(Dispatchers.Main) {
                     if (upd.isNotEmpty()) downloads = downloads + upd
+                    // Lead-review #2 п.4: failed — terminal (не query дальше),
+                    // строка остаётся в UI для dismiss.
+                    for ((id, info) in upd) {
+                        if (info.failed) {
+                            dlTerminal = com.neuropocket.app.core.DlPollPolicy.markTerminal(dlTerminal, id)
+                        }
+                    }
                     val doneIds = downloads.filter { it.value.done }.keys
                     if (doneIds.isNotEmpty()) {
                         downloads = downloads - doneIds
@@ -2357,8 +2404,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun dismissAmbiguousLoad() { pendingAmbiguousLoad = null }
 
     fun requestLoadFile(f: File, nCtx: Int = -1) {
-        // Red-team I: shared llama runtime занят столом — не грузим параллельно.
-        if (busy || agentRunning || sdBusy || rtRunning) {
+        // Lead-review #2 п.2/I: shared llama runtime занят столом — не грузим параллельно.
+        if (!com.neuropocket.app.core.SharedLlmGate.canLoadTextModel(busy, agentRunning, sdBusy, rtRunning)) {
             status = "Дождись конца текущей задачи."
             return
         }
@@ -2376,7 +2423,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 pendingAmbiguousCtx = nCtx
                 return
             }
-            else -> loadFileToRamInternal(f, nCtx, acknowledgedAmbiguous = true)
+            else -> loadFileToRamInternal(f, nCtx)
         }
     }
 
@@ -2386,7 +2433,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun confirmAmbiguousLoad() {
         val f = pendingAmbiguousLoad ?: return
         pendingAmbiguousLoad = null
-        loadFileToRamInternal(f, pendingAmbiguousCtx, acknowledgedAmbiguous = true)
+        loadFileToRamInternal(f, pendingAmbiguousCtx)
     }
 
     /** Authoritative catalog map: fileName -> kind (red-team H). */
@@ -2418,11 +2465,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Red-team K: честный размер для диалогов (directory = bounded recursive sum). */
     fun displaySizeMb(f: java.io.File): Long = com.neuropocket.app.core.FileInfo.displaySizeMb(f)
 
-    private fun loadFileToRamInternal(f: File, nCtx: Int = -1, acknowledgedAmbiguous: Boolean) {
-        if (busy || agentRunning || sdBusy) { status = "Дождись конца текущей задачи."; return }
-        // Сюда попадаем только после requestLoadFile-gate (или confirm диалога).
-        val wasAmbiguous = !acknowledgedAmbiguous &&
-            roleForFile(f) == com.neuropocket.app.core.ModelRole.AMBIGUOUS
+    private fun loadFileToRamInternal(f: File, nCtx: Int = -1) {
+        // Lead-review #2 п.2: финальный execution gate закрывает TOCTOU между
+        // confirm-диалогом ambiguous и фактической загрузкой.
+        if (!com.neuropocket.app.core.SharedLlmGate.canLoadTextModel(busy, agentRunning, sdBusy, rtRunning)) {
+            status = "Дождись конца текущей задачи."
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
         val ctxN = if (nCtx > 0) nCtx else ctxSize
         withContext(Dispatchers.Main) { status = "Загружаю ${f.name} в RAM… (ctx $ctxN, gpu $gpuLayers)" }
@@ -2432,8 +2481,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             refreshNativeState()
             NpLog.i("llm", "load rc=$rc file=" + f.name)
             status = when (rc) {
-                0 -> "Модель в RAM: ${f.name}. Движок: llama.cpp native." +
-                    if (wasAmbiguous) " (тип по имени неясен — проверь, что это текстовая LLM.)" else ""
+                0 -> "Модель в RAM: ${f.name}. Движок: llama.cpp native."
                 -99 -> "Native недоступен (нет .so). Нужна сборка с NDK."
                 -2 -> "Не открылся файл модели. Проверь GGUF."
                 -3 -> "Не хватило RAM/контекста. Попробуй модель меньше или nCtx 1024."
@@ -2849,18 +2897,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Red-team D: повтор SD после ERROR. */
+    /** Red-team D + lead-review #2 п.5: повтор SD после ERROR (тяжёлое — на IO). */
     fun retrySdEngine() {
         sdEngineState = com.neuropocket.app.core.SdEngine.next(
             sdEngineState, com.neuropocket.app.core.EngineEvent.RETRY
         )
         sdEngineError = null
-        try { refreshSdState() } catch (_: Exception) {
-            sdEngineState = com.neuropocket.app.core.SdEngineState.MISSING
-        }
-        if (sdEngineState == com.neuropocket.app.core.SdEngineState.MISSING) {
-            sdEngineUrl = null
-            resolveSdEngineUrl()
+        viewModelScope.launch(Dispatchers.IO) {
+            try { refreshSdState() } catch (_: Exception) {
+                withContext(Dispatchers.Main) {
+                    sdEngineState = com.neuropocket.app.core.SdEngineState.MISSING
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (sdEngineState == com.neuropocket.app.core.SdEngineState.MISSING) {
+                    sdEngineUrl = null
+                    resolveSdEngineUrl()
+                }
+            }
         }
     }
 

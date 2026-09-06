@@ -26,5 +26,13 @@ object RoundTableLogic {
      * чтобы encore реагировал на последние turns длинной дискуссии.
      */
     fun buildSeedContext(turns: List<RoundTurn>, limitChars: Int = 2000): String =
-        turns.takeLast(20).joinToString("\n") { it.name + ": " + it.text }.takeLast(limitChars)
+        tail(turns.takeLast(20).joinToString("\n") { it.name + ": " + it.text }, limitChars)
+
+    /**
+     * ЕДИНАЯ truncation для живой дискуссии (п.1 lead-review #2):
+     * production каждый turn берёт СВЕЖИЙ tail, а не первые N chars.
+     * buildSeedContext и per-turn prompt используют только его.
+     */
+    fun tail(text: String, limitChars: Int = 2000): String =
+        if (limitChars <= 0) "" else text.takeLast(limitChars)
 }

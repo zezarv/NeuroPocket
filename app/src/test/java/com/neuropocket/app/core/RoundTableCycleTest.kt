@@ -46,4 +46,23 @@ class RoundTableCycleTest {
         // старые вытеснены лимитом
         assertFalse(seed.contains("реплика номер 1\n"))
     }
+
+    @Test fun `per-turn tail keeps fresh answer for next participant`() {
+        // Lead-review #2 п.1: oldSeed >= limit + freshTurnA -> контекст для B
+        // ОБЯЗАН содержать freshTurnA, oldest — вытеснен.
+        val oldSeed = "x".repeat(2000)
+        val acc = StringBuilder(oldSeed)
+        acc.append("\nA: свежий ответ A\n")
+        val contextForB = RoundTableLogic.tail(acc.toString(), 2000)
+        assertTrue(contextForB.contains("свежий ответ A"))
+        assertEquals(2000, contextForB.length)
+        // начало старого seed вытеснено
+        assertFalse(contextForB.startsWith("x".repeat(2000)))
+    }
+
+    @Test fun `tail single implementation`() {
+        assertEquals("", RoundTableLogic.tail("abc", 0))
+        assertEquals("abc", RoundTableLogic.tail("abc", 2000))
+        assertEquals("bc", RoundTableLogic.tail("abc", 2))
+    }
 }

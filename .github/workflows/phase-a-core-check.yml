@@ -19,9 +19,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Lead-review #2 п.7: meaningful delta-check нуждается в истории.
+          fetch-depth: 0
 
-      - name: Whitespace check
-        run: git diff --check
+      - name: Whitespace check (committed delta)
+        # На clean checkout `git diff --check` пуст; проверяем реальную дельту:
+        # PR -> base SHA в HEAD, review/main push -> origin/main...HEAD.
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --check ${{ github.event.pull_request.base.sha }}...HEAD
+          else
+            git diff --check origin/main...HEAD
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
