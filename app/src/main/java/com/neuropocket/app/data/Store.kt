@@ -48,6 +48,9 @@ object Store {
     private val KEY_VADMIN = intPreferencesKey("vad_min")
     private val KEY_BARGE = booleanPreferencesKey("barge_in")
     private val KEY_AUTOPOST = intPreferencesKey("autopost_hours")
+    // Phase B: безопасность автопостинга (cooldown/cap/pause).
+    private val KEY_LAST_AUTOPOST = longPreferencesKey("last_autopost_ts")
+    private val KEY_AUTOPOST_PAUSED = booleanPreferencesKey("autopost_paused")
     private val KEY_AUTOFB = booleanPreferencesKey("auto_fallback")
     private val KEY_ONBOARD = booleanPreferencesKey("onboarded")
     private val KEY_PROVIDERS = stringPreferencesKey("providers_json")
@@ -178,6 +181,10 @@ object Store {
     suspend fun setVadMin(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_VADMIN] = v } }
     suspend fun getAutopost(ctx: Context): Int = ctx.ds.data.map { it[KEY_AUTOPOST] ?: 0 }.first()
     suspend fun setAutopost(ctx: Context, v: Int) { ctx.ds.edit { it[KEY_AUTOPOST] = v } }
+    suspend fun getLastAutopost(ctx: Context): Long = ctx.ds.data.map { it[KEY_LAST_AUTOPOST] ?: 0L }.first()
+    suspend fun setLastAutopost(ctx: Context, v: Long) { ctx.ds.edit { it[KEY_LAST_AUTOPOST] = v } }
+    suspend fun isAutopostPaused(ctx: Context): Boolean = ctx.ds.data.map { it[KEY_AUTOPOST_PAUSED] ?: false }.first()
+    suspend fun setAutopostPaused(ctx: Context, v: Boolean) { ctx.ds.edit { it[KEY_AUTOPOST_PAUSED] = v } }
     suspend fun setAutoBackup(ctx: Context, v: Boolean) { ctx.ds.edit { it[KEY_AUTOBK] = v } }
     suspend fun setAutoUnload(ctx: Context, v: Boolean) { ctx.ds.edit { it[KEY_AUTOUNLOAD] = v } }
     suspend fun getAutoFallback(ctx: Context): Boolean = ctx.ds.data.map { it[KEY_AUTOFB] ?: true }.first()

@@ -56,6 +56,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var autoUnload by mutableStateOf(true); private set
     var autoBackup by mutableStateOf(false); private set
     var autopostHours by mutableStateOf(0); private set
+    var autopostPaused by mutableStateOf(false); private set
     var showTime by mutableStateOf(false); private set
     var serverTimeout by mutableStateOf(120); private set
     var vadSil by mutableStateOf(42); private set
@@ -287,6 +288,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             autoBackup = Store.getAutoBackup(ctx)
             showTime = Store.getShowTime(ctx); serverTimeout = Store.getServerTimeout(ctx)
             autopostHours = Store.getAutopost(ctx)
+            autopostPaused = Store.isAutopostPaused(ctx)
             vadSil = Store.getVadSil(ctx); vadMin = Store.getVadMin(ctx)
             bargeIn = Store.getBargeIn(ctx)
             applyAutopostWork(autopostHours)
@@ -1994,15 +1996,51 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             } catch (_: Exception) { "" }
             val line = raw.lines().map { it.trim() }.firstOrNull { it.length > 3 }?.take(300)
             if (!line.isNullOrBlank()) {
-                val nc = PostComment(postId = postId, authorId = personaId, text = line, aiMade = true)
+                // Честность: mock-заготовка помечается как шаблон, а не как ИИ.
+                val isMock = try {
+                    com.neuropocket.app.core.CapabilityDisclosure.isMockOutput(line)
+                } catch (_: Exception) { false }
+                val nc = PostComment(
+                    postId = postId, authorId = personaId, text = line,
+                    aiMade = !isMock, template = isMock
+                )
                 val all = (Store.loadComments(ctx) + nc).takeLast(500)
                 Store.saveComments(ctx, all)
-                withContext(Dispatchers.Main) { comments = all.sortedBy { it.ts }; status = "Готово." }
+                withContext(Dispatchers.Main) {
+                    comments = all.sortedBy { it.ts }
+                    status = if (isMock) "Готово (шаблон — нет модели)." else "Готово."
+                }
             } else {
                 withContext(Dispatchers.Main) { status = "Не вышло, попробуй ещё." }
             }
         }
     }
+
+    /** Phase B: настоящий репост — ссылка на оригинал, а не копия текста. */
+    fun repostPost(originalId: String, comment: String = "") {
+        val orig = posts.find { it.id == originalId } ?: return
+        val me = activePersona ?: personas.firstOrNull() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val all = Store.loadPosts(ctx)
+            // защита от двойного репоста того же оригинала подряд
+            if (all.firstOrNull()?.repostOfId == originalId) {
+                withContext(Dispatchers.Main) { status = "Уже репостнул последним." }
+                return@launch
+            }
+            val np = SocialPost(
+                authorId = me.id,
+                text = comment.trim().take(300),
+                likes = 0, aiMade = false,
+                repostOfId = orig.id
+            )
+            val nl = (listOf(np) + all).sortedByDescending { it.ts }.take(200)
+            Store.savePosts(ctx, nl)
+            withContext(Dispatchers.Main) { posts = nl; status = "Репост опубликован." }
+        }
+    }
+
+    fun repostOrigin(post: SocialPost): SocialPost? =
+        post.repostOfId?.let { id -> posts.find { it.id == id } }
 
     fun updatePost(id: String, text: String) { viewModelScope.launch(Dispatchers.IO) {
         val t = text.trim().take(500)
@@ -2033,16 +2071,40 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         "Каждый с новой строки, до 200 символов, добавь 1–2 хэштега (#тема). Без нумерации."
                 )
             } catch (_: Exception) { "" }
+            val existing = Store.loadPosts(ctx)
             val lines = raw.lines().map { it.trim().trimStart('-', '*', '•', '1', '2', '3', '4', '5', '.', ')', ' ').trim() }
-                .filter { it.length > 8 }.take(count)
-            val made = if (lines.isEmpty()) {
-                (1..count).map { SocialPost(authorId = personaId, text = mock.randomPost()) }
+                .filter { it.length > 8 }
+                // duplicate prevention: не публикуем то, что уже есть в ленте
+                .filter { !com.neuropocket.app.core.SocialPolicy.isDuplicate(it, existing) }
+                .take(count)
+            val made: List<SocialPost>
+            val usedTemplate: Boolean
+            if (lines.isEmpty()) {
+                // Честно: mock-шаблоны помечены template=true (не выдаются за ИИ).
+                val variants = mutableListOf<SocialPost>()
+                var guard = 0
+                while (variants.size < count && guard < count * 4) {
+                    guard++
+                    val t = mock.randomPost()
+                    if (com.neuropocket.app.core.SocialPolicy.isDuplicate(t, existing + variants)) continue
+                    variants.add(SocialPost(authorId = personaId, text = t, aiMade = false, template = true))
+                }
+                made = variants
+                usedTemplate = true
             } else {
-                lines.map { SocialPost(authorId = personaId, text = it.take(300), aiMade = true) }
+                made = lines.map { SocialPost(authorId = personaId, text = it.take(300), aiMade = true) }
+                usedTemplate = false
             }
-            val all = (made + Store.loadPosts(ctx)).sortedByDescending { it.ts }.take(200)
+            if (made.isEmpty()) {
+                withContext(Dispatchers.Main) { status = "Всё уже было — дубликаты не публикуем." }
+                return@launch
+            }
+            val all = (made + existing).sortedByDescending { it.ts }.take(200)
             Store.savePosts(ctx, all)
-            withContext(Dispatchers.Main) { posts = all; status = "Готово." }
+            withContext(Dispatchers.Main) {
+                posts = all
+                status = if (usedTemplate) "Готово (шаблоны — нет модели/провайдера)." else "Готово."
+            }
         }
     }
 
@@ -2366,6 +2428,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             Store.setAutopost(ctx, h); autopostHours = h
             applyAutopostWork(h)
             status = if (h == 0) "Автопостинг выключен." else "Автопостинг каждые ${h}ч."
+        }
+    }
+
+    /** Пауза автоматики без потери интервала. */
+    fun applyAutopostPaused(v: Boolean) {
+        viewModelScope.launch {
+            Store.setAutopostPaused(ctx, v); autopostPaused = v
+            status = if (v) "Автопостинг на паузе." else "Автопостинг снят с паузы."
         }
     }
 

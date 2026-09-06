@@ -83,7 +83,9 @@ data class PostComment(
     val authorId: String = "",
     val text: String = "",
     val ts: Long = System.currentTimeMillis(),
-    val aiMade: Boolean = false
+    val aiMade: Boolean = false,
+    // Phase B: mock/template fallback помечается честно.
+    val template: Boolean = false
 )
 
 @Serializable

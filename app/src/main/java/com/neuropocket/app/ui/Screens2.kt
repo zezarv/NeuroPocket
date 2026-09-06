@@ -99,8 +99,13 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                             label = { Text(nm) })
                         Spacer(Modifier.width(4.dp))
                     }
+                    Spacer(Modifier.weight(1f))
+                    FilterChip(selected = vm.autopostPaused, onClick = { vm.applyAutopostPaused(!vm.autopostPaused) },
+                        label = { Text(if (vm.autopostPaused) "Пауза ⏸" else "Пауза") })
                 }
-                Text("Фон: случайная персона, движок — твой провайдер или шаблоны.",
+                Text(com.neuropocket.app.core.SocialPolicy.autopostModeDescription(vm.activeProviderId),
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                Text("Лимит: ${com.neuropocket.app.core.SocialPolicy.AUTOPOST_DAILY_CAP}/день • пауза между постами ≥ ${com.neuropocket.app.core.SocialPolicy.AUTOPOST_COOLDOWN_H}ч • без дубликатов.",
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
             }
             item {
@@ -132,6 +137,23 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                                     color = MaterialTheme.colorScheme.secondary)
                             }
                             if (p.aiMade) AssistChip(onClick = {}, label = { Text("ИИ") })
+                            if (p.template) AssistChip(onClick = {}, label = { Text("Шаблон") })
+                            if (p.repostOfId != null) AssistChip(onClick = {}, label = { Text("Репост") })
+                        }
+                        // Ссылка на оригинал репоста (не копия текста).
+                        p.repostOfId?.let { oid ->
+                            val orig = vm.posts.find { it.id == oid }
+                            val oa = orig?.let { o -> vm.personas.find { it.id == o.authorId } }
+                            OutlinedCard(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                Column(Modifier.padding(8.dp)) {
+                                    Text(
+                                        if (orig != null) "↩ ${oa?.name ?: "?"}: ${orig.text.take(220)}"
+                                        else "↩ оригинал удалён",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.secondary
+                                    )
+                                }
+                            }
                         }
                         Spacer(Modifier.height(6.dp))
                         HashtagText(p.text, active = tagFilter) { tagFilter = it }
@@ -157,9 +179,7 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                             }
                             Text("${p.likes}")
                             Spacer(Modifier.weight(1f))
-                            TextButton(onClick = {
-                                if (author != null) vm.addPost(author.id, p.text)
-                            }) { Text("Репост") }
+                            TextButton(onClick = { vm.repostPost(p.id) }) { Text("Репост") }
                             TextButton(onClick = { editId = p.id; editText = p.text }) { Text("Правка") }
                             TextButton(onClick = { vm.deletePost(p.id) }) { Text("Удалить") }
                         }
@@ -178,6 +198,10 @@ fun SocialScreen(vm: AppViewModel, onOpenPersona: (String) -> Unit) {
                                             if (c.aiMade) {
                                                 Text("ИИ", style = MaterialTheme.typography.labelSmall,
                                                     color = MaterialTheme.colorScheme.primary)
+                                            }
+                                            if (c.template) {
+                                                Text("Шаблон", style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.secondary)
                                             }
                                         }
                                         Text(c.text, style = MaterialTheme.typography.bodySmall)
