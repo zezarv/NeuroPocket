@@ -788,8 +788,11 @@ fun ToolsScreen(
             item {
                 ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("Агент (план + выполнение, локально)", style = MaterialTheme.typography.titleSmall)
+                        Text("Агент (реальные действия, локально)", style = MaterialTheme.typography.titleSmall)
                         Text("Движок: ${vm.engineLabel()}", style = MaterialTheme.typography.bodySmall)
+                        Text("Действия: заметки, саммари, перевод, анализ, черновик поста. Недоступное честно помечается.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.secondary)
                         Spacer(Modifier.height(6.dp))
                         OutlinedTextField(agentTask, { agentTask = it }, label = { Text("Задача агенту…") },
                             modifier = Modifier.fillMaxWidth(), minLines = 2)
@@ -806,10 +809,16 @@ fun ToolsScreen(
                             }
                         }
                         if (vm.agentRunning) LinearProgressIndicator(Modifier.fillMaxWidth())
+                        if (vm.agentPlanRaw.isNotBlank()) {
+                            Text("План: ${vm.agentPlanRaw.take(400)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.secondary)
+                            Spacer(Modifier.height(4.dp))
+                        }
                         vm.agentSteps.forEachIndexed { i, s ->
                             Row(verticalAlignment = Alignment.Top) {
                                 Text(
-                                    when (s.status) { "run" -> "⏳"; "done" -> "✅"; else -> "•" },
+                                    when (s.status) { "run" -> "⏳"; "done" -> "✅"; "fail" -> "❌"; else -> "•" },
                                     modifier = Modifier.padding(end = 6.dp)
                                 )
                                 Column(Modifier.weight(1f)) {

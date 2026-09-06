@@ -97,6 +97,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var agentSteps by mutableStateOf(listOf<com.neuropocket.app.engine.AgentStep>()); private set
     var agentRunning by mutableStateOf(false); private set
     var agentResult by mutableStateOf(""); private set
+    var agentPlanRaw by mutableStateOf(""); private set
     private var agentCancel = false
     var sdLoaded by mutableStateOf(false); private set
     var sdInfo by mutableStateOf("sd: нет"); private set
@@ -2057,23 +2058,258 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         agentCancel = false
         agentSteps = emptyList()
         agentResult = ""
+        agentPlanRaw = ""
         status = "Агент работает…"
         viewModelScope.launch(Dispatchers.IO) {
             llama.maxTokens = maxTokens; llama.topP = topP; llama.topK = topK
             val active = withFallbackEngine(chatEngineFor(p))
-            val (steps, final) = try {
-                com.neuropocket.app.engine.AgentRunner.runWithEngine(task, active, p, {
-                    viewModelScope.launch(Dispatchers.Main) { agentSteps = agentSteps.toList() }
-                }, { agentCancel })
+            // 1) planner: только структурированные ACTION-строки из белого списка
+            val planRaw = try {
+                active.generate(emptyList(), p, com.neuropocket.app.core.AgentExecutor.buildPlanPrompt(task))
+            } catch (e: Exception) { "" }
+            withContext(Dispatchers.Main) { agentPlanRaw = planRaw.take(2000) }
+            if (agentCancel) {
+                withContext(Dispatchers.Main) {
+                    agentSteps = emptyList()
+                    agentResult = "[Остановлено до выполнения.]"
+                    agentRunning = false
+                    status = "Агент остановлен."
+                }
+                return@launch
+            }
+            // 2) выполнение РЕАЛЬНЫХ app actions (никаких галлюцинаций успеха)
+            val handler = AgentAppHandler(active, p)
+            val (execSteps, summary) = try {
+                com.neuropocket.app.core.AgentExecutor.run(planRaw, handler) { agentCancel }
             } catch (e: Exception) {
-                emptyList<com.neuropocket.app.engine.AgentStep>() to "[Агент упал: ${e.message}]"
+                emptyList<com.neuropocket.app.core.AgentExecStep>() to "[Агент упал: ${e.message}]"
+            }
+            // 3) если действий не было — честный прямой ответ (помечен, не выдаётся за action)
+            var final = summary
+            if (execSteps.none { it.status == com.neuropocket.app.core.AgentExecutor.ST_DONE } && !agentCancel) {
+                val direct = try {
+                    active.generate(
+                        emptyList(), p,
+                        "Задача: ${task.take(800)}\nОтветь коротко и по делу (подходящих действий из списка не нашлось)."
+                    )
+                } catch (_: Exception) { "" }
+                if (direct.isNotBlank()) {
+                    final = (summary + "\n\n[Прямой ответ — действий не требовалось:]\n" + direct).take(2500)
+                }
+            }
+            if (agentCancel) {
+                final = "[Остановлено.]\n" + final
+            }
+            val uiSteps = execSteps.map { e ->
+                com.neuropocket.app.engine.AgentStep(
+                    text = e.action?.let { a ->
+                        a.type + if (a.args.isNotEmpty()) {
+                            ": " + a.args.entries.joinToString("; ") { "${it.key}=${it.value.take(100)}" }.take(200)
+                        } else ""
+                    } ?: "INVALID: ${e.rawLine.take(200)}",
+                    status = if (e.status == com.neuropocket.app.core.AgentExecutor.ST_DONE) "done" else "fail",
+                    result = e.result.take(1200)
+                )
             }
             withContext(Dispatchers.Main) {
-                agentSteps = steps
-                agentResult = final
+                agentSteps = uiSteps
+                agentResult = final.take(2500)
                 agentRunning = false
+                try { refreshModelFiles() } catch (_: Exception) {}
                 status = "Агент готов. Офлайн."
             }
+        }
+    }
+
+    /** Настоящий handler действий агента: только реальные операции приложения. */
+    private inner class AgentAppHandler(
+        private val engine: com.neuropocket.app.engine.AiEngine,
+        private val persona: Persona
+    ) : com.neuropocket.app.core.AgentActionHandler {
+        private val T = com.neuropocket.app.core.AgentActionTypes
+
+        override fun isAvailable(type: String): Boolean = when (type) {
+            T.TRANSCRIBE_AUDIO -> whisperLoaded
+            T.ANALYZE_IMAGE -> visionLoaded
+            else -> type in T.ALL
+        }
+
+        override suspend fun execute(
+            action: com.neuropocket.app.core.AgentAction
+        ): com.neuropocket.app.core.AgentExecResult {
+            return try {
+                when (action.type) {
+                    T.SEARCH_NOTES -> {
+                        val q = action.args["query"] ?: ""
+                        if (q.isBlank()) return com.neuropocket.app.core.AgentExecResult.Error("Пустой query.")
+                        val hits = mutableListOf<String>()
+                        val files = noteFiles.take(40)
+                        for (name in files) {
+                            if (hits.size >= 5) break
+                            try {
+                                val content = readNote(name)
+                                val idx = content.indexOf(q, ignoreCase = true)
+                                if (name.contains(q, ignoreCase = true) || idx >= 0) {
+                                    val snip = if (idx >= 0) {
+                                        content.substring(maxOf(0, idx - 60), minOf(content.length, idx + 140))
+                                            .replace("\n", " ").take(200)
+                                    } else "(совпадение в имени)"
+                                    hits.add("$name: …$snip…")
+                                }
+                            } catch (_: Exception) { }
+                        }
+                        com.neuropocket.app.core.AgentExecResult.Success(if (hits.isEmpty()) "По «$q» ничего не найдено в ${files.size} заметках." else "Найдено ${hits.size}:\n" + hits.joinToString("\n"))
+                    }
+                    T.READ_NOTE -> {
+                        val name = action.args["name"] ?: ""
+                        if (name.isBlank()) return com.neuropocket.app.core.AgentExecResult.Error("Нет имени заметки.")
+                        if (name !in noteFiles) return com.neuropocket.app.core.AgentExecResult.Error("Нет такой заметки: $name.")
+                        val content = readNote(name)
+                        if (content.isBlank()) com.neuropocket.app.core.AgentExecResult.Success("$name: (пустая заметка).")
+                        else com.neuropocket.app.core.AgentExecResult.Success("$name:\n" + content.take(4000))
+                    }
+                    T.WRITE_NOTE -> {
+                        val name = sanitizeAgentNoteName(action.args["name"] ?: "")
+                        val text = action.args["text"] ?: ""
+                        if (text.isBlank()) return com.neuropocket.app.core.AgentExecResult.Error("Пустой text.")
+                        File(notesDir(), name).writeText(text.take(50000))
+                        com.neuropocket.app.core.AgentExecResult.Success("Сохранено: $name (${text.length} символов).")
+                    }
+                    T.SUMMARIZE_TEXT -> {
+                        val text = action.args["text"] ?: ""
+                        if (text.isBlank()) return com.neuropocket.app.core.AgentExecResult.Error("Пустой text.")
+                        val out = engine.generate(
+                            emptyList(), persona,
+                            com.neuropocket.app.core.SummarizerWorkflow.buildSinglePrompt(text.take(10000), action.args["mode"] ?: "short")
+                        )
+                        com.neuropocket.app.core.AgentExecResult.Success(markMock(out))
+                    }
+                    T.TRANSLATE_TEXT -> {
+                        val text = action.args["text"] ?: ""
+                        if (text.isBlank()) return com.neuropocket.app.core.AgentExecResult.Error("Пустой text.")
+                        val target = action.args["target"]?.ifBlank { null } ?: "русский"
+                        val source = action.args["source"]?.ifBlank { null } ?: "авто"
+                        val out = engine.generate(
+                            emptyList(), persona,
+                            com.neuropocket.app.core.TranslatorWorkflow.buildChunkPrompt(
+                                text.take(6000), source, target,
+                                com.neuropocket.app.core.TranslatorWorkflow.Options(), 0, 1
+                            )
+                        )
+                        com.neuropocket.app.core.AgentExecResult.Success(markMock(out))
+                    }
+                    T.ANALYZE_TEXT -> {
+                        val text = action.args["text"] ?: ""
+                        if (text.isBlank()) return com.neuropocket.app.core.AgentExecResult.Error("Пустой text.")
+                        val out = engine.generate(
+                            emptyList(), persona,
+                            com.neuropocket.app.core.AnalyzerWorkflow.buildPrompt(text.take(10000))
+                        )
+                        com.neuropocket.app.core.AgentExecResult.Success(markMock(out))
+                    }
+                    T.TRANSCRIBE_AUDIO -> {
+                        val name = action.args["file"] ?: ""
+                        val f = resolveAgentFile(name)
+                            ?: return com.neuropocket.app.core.AgentExecResult.Unavailable("файл «$name» не найден в хранилище приложения.")
+                        if (!whisperLoaded) return com.neuropocket.app.core.AgentExecResult.Unavailable("whisper не загружен в RAM (Модели → whisper).")
+                        com.neuropocket.app.core.AgentExecResult.Success(transcribeAgentFile(f, action.args["lang"] ?: sttLang))
+                    }
+                    T.ANALYZE_IMAGE -> {
+                        val name = action.args["file"] ?: ""
+                        val f = resolveAgentFile(name)
+                            ?: return com.neuropocket.app.core.AgentExecResult.Unavailable("файл «$name» не найден в хранилище приложения.")
+                        if (!visionLoaded) return com.neuropocket.app.core.AgentExecResult.Unavailable("vision не загружен в RAM (Модели → mmproj).")
+                        com.neuropocket.app.core.AgentExecResult.Success(describeAgentFile(f, action.args["question"] ?: ""))
+                    }
+                    T.CREATE_SOCIAL_DRAFT -> {
+                        val text = action.args["text"] ?: ""
+                        if (text.isBlank()) return com.neuropocket.app.core.AgentExecResult.Error("Пустой text.")
+                        val key = action.args["persona"] ?: ""
+                        val per = personas.find { it.id == key || it.name.equals(key, true) }
+                            ?: activePersona ?: personas.firstOrNull()
+                            ?: return com.neuropocket.app.core.AgentExecResult.Error("Нет персон для черновика.")
+                        // Черновик НЕ публикуется — только превью. Публикация — явным действием пользователя.
+                        com.neuropocket.app.core.AgentExecResult.Success("Черновик для ${per.name}: ${text.take(300)} [DRAFT — не опубликовано]")
+                    }
+                    T.SAVE_RESULT -> {
+                        val text = action.args["text"] ?: ""
+                        if (text.isBlank()) return com.neuropocket.app.core.AgentExecResult.Error("Пустой text.")
+                        val name = sanitizeAgentNoteName(
+                            action.args["name"]?.ifBlank { null } ?: "agent-${System.currentTimeMillis()}.md"
+                        )
+                        File(notesDir(), name).writeText(text.take(50000))
+                        com.neuropocket.app.core.AgentExecResult.Success("Результат сохранён: $name.")
+                    }
+                    else -> com.neuropocket.app.core.AgentExecResult.Error("Неизвестное действие: ${action.type}.")
+                }
+            } catch (e: Exception) {
+                com.neuropocket.app.core.AgentExecResult.Error(e.message?.take(200) ?: "?")
+            }
+        }
+
+        private fun markMock(out: String): String {
+            return try {
+                if (com.neuropocket.app.core.CapabilityDisclosure.isMockOutput(out)) {
+                    out.take(1400) + "\n[Mock / template fallback]"
+                } else out.take(1500)
+            } catch (_: Exception) { out.take(1500) }
+        }
+
+        private fun sanitizeAgentNoteName(raw: String): String {
+            var n = raw.trim().ifBlank { "заметка" }
+                .replace(Regex("[^A-Za-z0-9а-яА-ЯёЁ _\\-.]"), "_").take(60)
+            if (!n.endsWith(".md", true) && !n.endsWith(".txt", true)) n += ".md"
+            return n
+        }
+
+        /** Только файлы внутри хранилища приложения; выход наружу запрещён. */
+        private fun resolveAgentFile(name: String): File? {
+            val n = name.trim().take(200)
+            if (n.isBlank() || n.contains("..") || n.contains("/") || n.contains("\\")) return null
+            val base = ctx.getExternalFilesDir(null) ?: return null
+            val candidates = listOf(
+                File(com.neuropocket.app.data.Store.modelsDir(ctx), n),
+                File(notesDir(), n),
+                File(File(base, "pictures"), n),
+                File(ctx.cacheDir, n)
+            )
+            return candidates.firstOrNull { it.isFile && it.exists() }
+        }
+
+        private fun transcribeAgentFile(f: File, lang: String): String {
+            if (f.length() > 120L * 1024 * 1024) throw Exception("Аудиофайл больше 120 МБ.")
+            var wavPath = f.absolutePath
+            val ext = f.extension.lowercase()
+            if (ext != "wav") {
+                val mono = com.neuropocket.app.voice.MediaDecode.toMono16k(f)
+                    ?: throw Exception("Не смог декодировать $ext.")
+                if (mono.size > 16000 * 60 * 10) throw Exception("Аудио длиннее 10 минут.")
+                val tmp = File(ctx.cacheDir, "agent16k-${System.currentTimeMillis()}.wav")
+                com.neuropocket.app.voice.WavUtils.writeMono16k(tmp, mono)
+                wavPath = tmp.absolutePath
+            } else if (!com.neuropocket.app.voice.WavUtils.isReady16kMono(f.absolutePath)) {
+                val p = com.neuropocket.app.voice.WavUtils.read(f.absolutePath)
+                    ?: throw Exception("Не смог прочитать WAV.")
+                val mono = com.neuropocket.app.voice.WavUtils.toMono16k(p)
+                if (mono.size > 16000 * 60 * 10) throw Exception("Аудио длиннее 10 минут.")
+                val tmp = File(ctx.cacheDir, "agent16k-${System.currentTimeMillis()}.wav")
+                com.neuropocket.app.voice.WavUtils.writeMono16k(tmp, mono)
+                wavPath = tmp.absolutePath
+            }
+            val text = com.neuropocket.app.engine.WhisperNative.transcribe(wavPath, lang, threadsEffective())
+            if (text.isBlank()) throw Exception("Whisper вернул пусто.")
+            return "Транскрипт ${f.name}:\n" + text.take(4000)
+        }
+
+        private fun describeAgentFile(f: File, question: String): String {
+            if (f.length() > 15L * 1024 * 1024) throw Exception("Изображение больше 15 МБ.")
+            val bytes = f.readBytes()
+            val out = com.neuropocket.app.engine.LlamaNative.describeImage(
+                bytes, question.ifBlank { "Опиши изображение: что на нём происходит?" }, 256,
+                activePersona?.temperature ?: 0.7f
+            )
+            if (out.isBlank()) throw Exception("Vision вернул пусто.")
+            return "Разбор ${f.name}:\n" + out.take(3000)
         }
     }
 
