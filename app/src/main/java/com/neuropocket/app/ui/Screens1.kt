@@ -415,7 +415,8 @@ fun ToolsScreen(
     onBack: (() -> Unit)? = null,
     initialCard: String = "",
     onOpenTool: (String) -> Unit = {},
-    onOpenChats: () -> Unit = {}
+    onOpenChats: () -> Unit = {},
+    onOpenUtils: () -> Unit = {}
 ) {
     var box by remember { mutableStateOf("") }
     var agentTask by remember { mutableStateOf("") }
@@ -1021,6 +1022,8 @@ fun ToolsScreen(
                             Spacer(Modifier.height(4.dp))
                         }
                         Button(onClick = { agentTask = box }, modifier = Modifier.fillMaxWidth()) { Text("Отправить задачу агенту ↑") }
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedButton(onClick = onOpenUtils, modifier = Modifier.fillMaxWidth()) { Text("Утилиты: калькулятор, JSON, Base64…") }
                         Spacer(Modifier.height(6.dp))
                         OutlinedTextField(box, { box = it }, label = { Text("Быстрая задача агенту…") },
                             modifier = Modifier.fillMaxWidth(), minLines = 2)

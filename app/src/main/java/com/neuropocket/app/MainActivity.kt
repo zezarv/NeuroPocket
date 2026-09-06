@@ -292,6 +292,7 @@ class MainActivity : ComponentActivity() {
                                         vm, ov.removePrefix("tool:"),
                                         onBack = { overlay = null },
                                         onDiscuss = { overlay = null; openTab(1); vm.discussInChat(it) })
+                                    ov == "utils" -> UtilitiesScreen(onBack = { overlay = null })
                                 }
                                 return@Surface
                             }
@@ -319,7 +320,8 @@ class MainActivity : ComponentActivity() {
                                         onBack = { hubRoute = null },
                                         onOpenChats = { hubRoute = null; overlay = null; tab = 1 },
                                         initialCard = hubRoute?.substringAfter(":", "") ?: "",
-                                        onOpenTool = { openTool(it) })
+                                        onOpenTool = { openTool(it) },
+                                        onOpenUtils = { overlay = "utils" })
                                 }
                                 1 -> ChatScreen(vm, onMenu = { scope.launch { drawer.open() } })
                                 2 -> PersonasScreen(vm,
