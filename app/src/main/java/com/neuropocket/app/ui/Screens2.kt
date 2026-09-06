@@ -432,13 +432,24 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                             "Движок: " + when (vm.voiceEngineState) {
                                 "ok" -> "готов"
                                 "file" -> "файл есть"
+                                "downloading" -> "скачиваю…"
+                                "verifying" -> "проверяю (size/SHA-256)…"
+                                "installing" -> "устанавливаю…"
+                                "error" -> "ошибка — можно повторить"
                                 else -> "нужно скачать (~10 МБ)"
                             } + " • " + vm.ttsInfo,
                             style = MaterialTheme.typography.bodySmall
                         )
-                        if (vm.voiceEngineState == "missing") {
+                        if (vm.voiceEngineState == "missing" || vm.voiceEngineState == "error") {
+                            if (vm.voiceEngineState == "error") {
+                                Text(vm.status, style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error)
+                            }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (vm.voiceEngineUrl == null) {
+                                if (vm.voiceEngineState == "error") {
+                                    Button(onClick = { vm.retryVoiceEngine() },
+                                        modifier = Modifier.weight(1f)) { Text("Повторить") }
+                                } else if (vm.voiceEngineUrl == null) {
                                     OutlinedButton(onClick = { vm.resolveVoiceEngineUrl() },
                                         enabled = !vm.voiceEngineBusy, modifier = Modifier.weight(1f)) {
                                         Text(if (vm.voiceEngineBusy) "Ищу…" else "Найти движок")
@@ -449,6 +460,14 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                                     }, modifier = Modifier.weight(1f)) { Text("Скачать (~10 МБ)") }
                                 }
                             }
+                            DlRow(vm, "voice-engine-arm64.zip")
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        if (vm.voiceEngineState == "downloading" ||
+                            vm.voiceEngineState == "verifying" ||
+                            vm.voiceEngineState == "installing"
+                        ) {
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
                             DlRow(vm, "voice-engine-arm64.zip")
                             Spacer(Modifier.height(4.dp))
                         }
@@ -580,9 +599,8 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
             }
         }
     }
-    // P0.6: подтверждение удаления с именем/размером/типом.
+    // P0.6 + red-team F: подтверждение удаления с именем/размером/типом.
     confirmDelete?.let { f ->
-        val role = com.neuropocket.app.core.ModelRoles.classify(f.name)
         val sizeMb = try { f.length() / 1048576 } catch (_: Exception) { -1 }
         val loadedMark = when {
             vm.loadedTextPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
@@ -599,7 +617,7 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                 Text(
                     "Имя: ${f.name}\n" +
                         "Размер: ${if (sizeMb >= 0) "$sizeMb МБ" else "?"} \n" +
-                        "Тип: ${com.neuropocket.app.core.ModelRoles.labelRu(role)}$loadedMark"
+                        "Тип: ${com.neuropocket.app.core.ModelRoles.describeFile(f.name)}$loadedMark"
                 )
             },
             confirmButton = {

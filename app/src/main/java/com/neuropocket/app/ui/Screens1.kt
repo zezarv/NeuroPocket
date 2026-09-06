@@ -1011,7 +1011,6 @@ fun ToolsScreen(
         }
     }
     confirmDelete?.let { f ->
-        val role = com.neuropocket.app.core.ModelRoles.classify(f.name)
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             title = { Text("Удалить файл?") },
@@ -1019,7 +1018,7 @@ fun ToolsScreen(
                 Text(
                     "Имя: ${f.name}\n" +
                         "Размер: ${try { f.length() / 1048576 } catch (_: Exception) { -1 }} МБ\n" +
-                        "Тип: ${com.neuropocket.app.core.ModelRoles.labelRu(role)}"
+                        "Тип: ${com.neuropocket.app.core.ModelRoles.describeFile(f.name)}"
                 )
             },
             confirmButton = {

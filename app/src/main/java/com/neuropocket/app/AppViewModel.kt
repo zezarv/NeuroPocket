@@ -272,7 +272,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             messages = cur
             posts = ps.sortedByDescending { it.ts }
             comments = Store.loadComments(ctx).sortedBy { it.ts }
-            comments = Store.loadComments(ctx).sortedBy { it.ts }
             toolRuns = toolMap
             pchats = pchatMap
             activeModelId = am
@@ -393,7 +392,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     } }
 
     fun voicesDir(): File = File(ctx.getExternalFilesDir(null), "models/voices").apply { mkdirs() }
-    fun voiceEngineDir(): File = File(ctx.getExternalFilesDir(null), "voice_engine").apply { mkdirs() }
+    /**
+     * Red-team B: исполняемый native runtime живёт в PRIVATE INTERNAL storage
+     * (filesDir), а не в external. System.load вызывается только оттуда.
+     * DownloadManager по-прежнему качает во external (папка models, файлы .part), затем
+     * файл проверяется против AssetManifest и атомарно устанавливается внутрь.
+     * Android 9-16: mmap(PROT_EXEC) своих файлов в internal app storage
+     * разрешён (так работают ReLinker/SQLCipher-подобные схемы); external
+     * (FUSE/sdcard) для исполнения ненадёжен — его больше не используем.
+     */
+    fun voiceEngineDir(): File = File(ctx.filesDir, "voice_engine").apply { mkdirs() }
+
+    /** Одноразовая миграция legacy external voice_engine -> internal (size-verified). */
+    private fun migrateLegacyVoiceEngine() {
+        try {
+            val legacy = File(ctx.getExternalFilesDir(null), "voice_engine")
+            if (!legacy.exists() || legacy.canonicalPath == voiceEngineDir().canonicalPath) return
+            val dst = voiceEngineDir()
+            var okAll = true
+            for ((name, size) in com.neuropocket.app.core.AssetManifest.VOICE_ZIP_FILES) {
+                val src = File(legacy, name)
+                val cur = File(dst, name)
+                if (cur.exists() && cur.length() == size) continue
+                if (src.isFile && src.length() == size) {
+                    src.copyTo(cur, overwrite = true)
+                } else okAll = false
+            }
+            // чистим legacy только при полной успешной миграции
+            if (okAll && dst.listFiles()?.isNotEmpty() == true) {
+                try { legacy.deleteRecursively() } catch (_: Exception) { }
+            }
+        } catch (_: Exception) { }
+    }
     // P0.2: однозначное начальное состояние, refresh при reload (см. reload()).
     var voiceEngineState by mutableStateOf("missing"); private set
     var voiceEngineUrl by mutableStateOf<String?>(null); private set
@@ -411,11 +441,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun tryLoadVoiceEngineFiles(): Boolean {
+        migrateLegacyVoiceEngine()
         val dir = voiceEngineDir()
         val ort = java.io.File(dir, "libonnxruntime.so")
         val jni = java.io.File(dir, "libsherpa-onnx-jni.so")
+        // Fail-closed: грузим только ожидаемые размеры (manifest), не любые .so.
+        val exp = com.neuropocket.app.core.AssetManifest.VOICE_ZIP_FILES
+        if (ort.length() != exp.getValue("libonnxruntime.so")) return false
+        if (jni.length() != exp.getValue("libsherpa-onnx-jni.so")) return false
         if (!ort.exists() || !jni.exists()) return false
         return try {
+            // Порядок важен (измерено llvm-readelf): jni NEEDED onnxruntime.
             System.load(ort.absolutePath)
             System.load(jni.absolutePath)
             true
@@ -471,6 +507,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun downloadVoiceEngine(url: String) {
         if (url.isBlank()) return
+        // Red-team E: guard для любого URL, уходящего в DownloadManager.
+        if (!com.neuropocket.app.core.NetworkPolicy.isUrlAllowed(url)) {
+            status = com.neuropocket.app.core.NetworkPolicy.blockedReason(url)
+            return
+        }
         try {
             downloads.values.find { it.fileName == "voice-engine-arm64.zip" && !it.done }?.let { return }
             val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
@@ -478,14 +519,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 setTitle("voice-engine-arm64.zip")
                 setDescription("NeuroPocket: голосовой движок")
                 setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationInExternalFilesDir(ctx, "models", "voice-engine-arm64.zip")
+                // Red-team B: качаем как .part во external; финальная установка —
+                // только после verify против AssetManifest в internal storage.
+                setDestinationInExternalFilesDir(ctx, "models", "voice-engine-arm64.zip.part")
                 setAllowedOverMetered(!wifiOnly); setAllowedOverRoaming(false)
             }
             val id = dm.enqueue(req)
             downloads = downloads + (id to DlInfo("voice-engine-arm64.zip", "В очереди…", 0f, false, false))
+            voiceEngineState = "downloading"
             status = "Качаю голосовой движок…"
             startDlPoll()
-        } catch (e: Exception) { status = "Ошибка загрузки: ${e.message}" }
+        } catch (e: Exception) {
+            voiceEngineState = "error"
+            status = "Ошибка загрузки: ${e.message}"
+        }
+    }
+
+    /** Red-team B: повтор после ERROR (сбрасывает состояние и ищет asset заново). */
+    fun retryVoiceEngine() {
+        try { refreshVoiceEngineState() } catch (_: Exception) { voiceEngineState = "missing" }
+        if (voiceEngineState == "missing" || voiceEngineState == "error") {
+            voiceEngineUrl = null
+            resolveVoiceEngineUrl()
+        }
     }
 
     fun extractVoiceEngine() { viewModelScope.launch(Dispatchers.IO) {
@@ -493,37 +549,51 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             voiceEngineState = "installing"
             status = "Распаковываю движок…"
         }
-        // P0.7: whitelist + zip-slip + atomic temp dir + cleanup. System.load только после проверки.
-        val allowed = setOf("libonnxruntime.so", "libsherpa-onnx-jni.so")
+        // P0.7 + red-team B/C: whitelist + zip-slip + exact-size + atomic tmp install.
+        // System.load только после проверки. Карантин битого файла.
+        val allowed = com.neuropocket.app.core.AssetManifest.VOICE_ZIP_FILES
         var tmpDir: java.io.File? = null
         try {
-            val zip = java.io.File(Store.modelsDir(ctx), "voice-engine-arm64.zip")
-            require(zip.exists() && zip.length() > 1024 * 1024) { "zip не найден или слишком мал" }
+            // Red-team C: verify скачанного .part против pinned manifest ДО распаковки.
+            val part = java.io.File(Store.modelsDir(ctx), "voice-engine-arm64.zip.part")
+            withContext(Dispatchers.Main) { voiceEngineState = "verifying" }
+            if (!com.neuropocket.app.core.AssetManifest.verifyFile(
+                    part, com.neuropocket.app.core.AssetManifest.VOICE_ENGINE
+                )
+            ) {
+                try { part.delete() } catch (_: Exception) { }
+                throw Exception(
+                    "движок не прошёл проверку (size/SHA-256, manifest " +
+                        com.neuropocket.app.core.AssetManifest.VOICE_ENGINE.releaseTag + "). " +
+                        "Файл удалён, попробуй скачать заново."
+                )
+            }
             val dir = voiceEngineDir()
             tmpDir = java.io.File(dir.parent, "voice_engine.tmp-${System.currentTimeMillis()}")
             tmpDir.mkdirs()
-            org.apache.commons.compress.archivers.zip.ZipFile(zip).use { zf ->
+            org.apache.commons.compress.archivers.zip.ZipFile(part).use { zf ->
                 val it = zf.entries
                 while (it.hasMoreElements()) {
                     val e = it.nextElement()
                     if (e.isDirectory) continue
                     // zip-slip: берём только basename из whitelist, отбрасываем пути
                     val name = java.io.File(e.name).name
-                    if (name !in allowed) continue
+                    val expected = allowed[name] ?: continue
                     if (e.size > 60 * 1024 * 1024) throw Exception("подозрительно большой $name")
                     val out = java.io.File(tmpDir, name)
                     // canonical check: out обязан лежать внутри tmpDir
                     require(out.canonicalPath.startsWith(tmpDir.canonicalPath + java.io.File.separator)) { "zip-slip" }
                     zf.getInputStream(e).use { ins -> out.outputStream().use { ins.copyTo(it) } }
-                    require(out.length() > 100 * 1024) { "$name слишком мал, архив бит" }
+                    // exact size из manifest, не эвристика
+                    require(out.length() == expected) { "$name: размер не совпал с manifest" }
                 }
             }
-            for (name in allowed) {
+            for ((name, size) in allowed) {
                 val f = java.io.File(tmpDir, name)
-                require(f.exists() && f.length() > 100 * 1024) { "в архиве нет $name" }
+                require(f.exists() && f.length() == size) { "в архиве нет $name" }
             }
-            // atomic install: tmp -> final
-            for (name in allowed) {
+            // atomic install: tmp -> final (internal storage)
+            for (name in allowed.keys) {
                 val src = java.io.File(tmpDir, name)
                 val dst = java.io.File(dir, name)
                 if (dst.exists()) dst.delete()
@@ -535,6 +605,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             }
             try { tmpDir.deleteRecursively() } catch (_: Exception) { }
             tmpDir = null
+            try { part.delete() } catch (_: Exception) { }
             val ok = voiceEngineFileReady()
             withContext(Dispatchers.Main) {
                 refreshVoiceEngineState()
@@ -545,7 +616,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             try { tmpDir?.deleteRecursively() } catch (_: Exception) { }
             withContext(Dispatchers.Main) {
                 voiceEngineState = "error"
-                status = "Ошибка распаковки: ${e.message?.take(120)}"
+                status = "Ошибка распаковки: ${e.message?.take(140)}"
             }
         }
     } }
@@ -1888,23 +1959,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         for (id in doneIds) {
                             val fn = upd[id]?.fileName ?: ""
                             if (fn == "libnpsd.so") {
-                                try {
-                                    val src = java.io.File(ctx.getExternalFilesDir(null), "models/libnpsd.so")
-                                    val dst = sdEngineFile()
-                                    if (src.exists()) {
-                                        src.copyTo(dst, overwrite = true)
-                                        src.delete()
-                                        ensureSdEngine()
-                                        refreshSdEngineState()
-                                        status = "Движок SD готов."
-                                    }
-                                } catch (_: Exception) { }
+                                // Red-team C: verify manifest -> atomic install в internal.
+                                installSdEnginePart()
                             }
                             if (fn == "NeuroPocket-update.apk") {
                                 status = "Обновление скачано."
                                 promptInstallUpdate()
                             }
                             if (fn == "voice-engine-arm64.zip") {
+                                // extractVoiceEngine сам verify против manifest + quarantine.
                                 extractVoiceEngine()
                             }
                         }
@@ -2053,6 +2116,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             status = "Это эмбеддинги — грузи кнопкой «Вектора в RAM»."
             return
         }
+        // Red-team F: эвристика по имени — не истина. Ambiguous GGUF пробуем как
+        // текст (native вернёт ошибку при несоответствии, состояние не портится),
+        // но честно говорим об этом в статусе.
+        val ambiguous = com.neuropocket.app.core.ModelRoles.isAmbiguous(f.name)
         viewModelScope.launch(Dispatchers.IO) {
         val ctxN = if (nCtx > 0) nCtx else ctxSize
         withContext(Dispatchers.Main) { status = "Загружаю ${f.name} в RAM… (ctx $ctxN, gpu $gpuLayers)" }
@@ -2062,7 +2129,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             refreshNativeState()
             NpLog.i("llm", "load rc=$rc file=" + f.name)
             status = when (rc) {
-                0 -> "Модель в RAM: ${f.name}. Движок: llama.cpp native."
+                0 -> "Модель в RAM: ${f.name}. Движок: llama.cpp native." +
+                    if (ambiguous) " (тип по имени неясен — проверь, что это текстовая LLM.)" else ""
                 -99 -> "Native недоступен (нет .so). Нужна сборка с NDK."
                 -2 -> "Не открылся файл модели. Проверь GGUF."
                 -3 -> "Не хватило RAM/контекста. Попробуй модель меньше или nCtx 1024."
@@ -2248,15 +2316,34 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     } }
 
-    fun sdEngineDir(): java.io.File = java.io.File(ctx.getExternalFilesDir(null), "sd_engine").apply { mkdirs() }
+    // Red-team B: SD runtime тоже в internal storage (см. voiceEngineDir).
+    fun sdEngineDir(): java.io.File = java.io.File(ctx.filesDir, "sd_engine").apply { mkdirs() }
     fun sdEngineFile(): java.io.File = java.io.File(sdEngineDir(), "libnpsd.so")
+
+    private fun migrateLegacySdEngine() {
+        try {
+            val legacy = java.io.File(ctx.getExternalFilesDir(null), "sd_engine")
+            if (!legacy.exists() || legacy.canonicalPath == sdEngineDir().canonicalPath) return
+            val src = java.io.File(legacy, "libnpsd.so")
+            val dst = sdEngineFile()
+            val want = com.neuropocket.app.core.AssetManifest.SD_ENGINE.sizeBytes
+            if (!dst.exists() && src.isFile && src.length() == want) {
+                src.copyTo(dst, overwrite = true)
+                if (dst.length() == want) {
+                    try { legacy.deleteRecursively() } catch (_: Exception) { }
+                }
+            }
+        } catch (_: Exception) { }
+    }
 
     /** Правда ли, что нативный движок SD доступен (встроен или подгружен). */
     fun ensureSdEngine(): Boolean {
         val nat = com.neuropocket.app.engine.SdNative
         if (nat.available) return true
+        migrateLegacySdEngine()
         val f = sdEngineFile()
-        if (f.exists() && f.length() > 10 * 1024 * 1024) {
+        // Fail-closed: только pinned размер из manifest.
+        if (f.exists() && f.length() == com.neuropocket.app.core.AssetManifest.SD_ENGINE.sizeBytes) {
             return try { nat.loadFromFile(f) } catch (_: Exception) { false }
         }
         return false
@@ -2369,6 +2456,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun downloadSdEngine(url: String) {
         if (url.isBlank()) return
+        // Red-team E: guard для любого URL, уходящего в DownloadManager.
+        if (!com.neuropocket.app.core.NetworkPolicy.isUrlAllowed(url)) {
+            status = com.neuropocket.app.core.NetworkPolicy.blockedReason(url)
+            return
+        }
         try {
             downloads.values.find { it.fileName == "libnpsd.so" && !it.done }?.let { return }
             val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
@@ -2376,7 +2468,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 setTitle("libnpsd.so")
                 setDescription("NeuroPocket: движок фото")
                 setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                setDestinationInExternalFilesDir(ctx, "models", "libnpsd.so")
+                // Red-team B: .part во external; установка в internal — после verify.
+                setDestinationInExternalFilesDir(ctx, "models", "libnpsd.so.part")
                 setAllowedOverMetered(!wifiOnly); setAllowedOverRoaming(false)
             }
             val id = dm.enqueue(req)
@@ -2384,6 +2477,44 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             status = "Качаю движок SD (51 МБ)…"
             startDlPoll()
         } catch (e: Exception) { status = "Ошибка загрузки: ${e.message}" }
+    }
+
+    /** Red-team C: установка скачанного SD .so: verify manifest -> atomic move в internal. */
+    private fun installSdEnginePart(): Boolean {
+        return try {
+            val part = java.io.File(Store.modelsDir(ctx), "libnpsd.so.part")
+            if (!com.neuropocket.app.core.AssetManifest.verifyFile(
+                    part, com.neuropocket.app.core.AssetManifest.SD_ENGINE
+                )
+            ) {
+                try { part.delete() } catch (_: Exception) { }
+                status = "SD движок не прошёл проверку (size/SHA-256). Файл удалён."
+                false
+            } else {
+                val dst = sdEngineFile()
+                if (dst.exists()) dst.delete()
+                val moved = try {
+                    part.renameTo(dst) || run {
+                        part.copyTo(dst, overwrite = true)
+                        part.delete()
+                        dst.exists()
+                    }
+                } catch (_: Exception) { false }
+                if (moved && dst.length() == com.neuropocket.app.core.AssetManifest.SD_ENGINE.sizeBytes) {
+                    ensureSdEngine()
+                    refreshSdEngineState()
+                    status = "Движок SD готов."
+                    true
+                } else {
+                    try { part.delete() } catch (_: Exception) { }
+                    status = "Не вышло установить SD движок."
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            status = "Ошибка установки SD: ${e.message?.take(120)}"
+            false
+        }
     }
 
     /** URL движка из последнего релиза GitHub. null = не найден/репо приватно. */
@@ -2433,19 +2564,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     val cur = try {
                         ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: ""
                     } catch (_: Exception) { "" }
-                    // P0.8: semantic comparison вместо equality строк.
-                    // "1.24.0-plan5" vs "v1.24.0" корректно сравниваются.
-                    val cmp = try { com.neuropocket.app.core.SemVer.compare(tag, cur) } catch (_: Exception) { 0 }
+                    // P0.8 + red-team D: решение через тестируемый UpdatePolicy.
+                    val decision = com.neuropocket.app.core.UpdatePolicy.decide(tag, cur)
                     withContext(Dispatchers.Main) {
                         if (tag.isBlank() || apkUrl.isNullOrBlank()) {
                             updateInfo = "В релизе нет APK."
-                        } else if (cmp == 0) {
-                            updateInfo = "У тебя свежая версия ($cur)."
-                        } else if (cmp < 0) {
-                            updateInfo = "У тебя новее ($cur), чем в релизе ($tag). Обновление не нужно."
-                        } else {
-                            updateInfo = "Доступно $tag (у тебя $cur).\n$body"
-                            updateUrl = apkUrl
+                        } else when (decision) {
+                            com.neuropocket.app.core.UpdatePolicy.Decision.UP_TO_DATE ->
+                                updateInfo = "У тебя свежая версия ($cur)."
+                            com.neuropocket.app.core.UpdatePolicy.Decision.NEWER_LOCAL ->
+                                updateInfo = "У тебя новее ($cur), чем в релизе ($tag). Обновление не нужно."
+                            com.neuropocket.app.core.UpdatePolicy.Decision.AVAILABLE -> {
+                                updateInfo = "Доступно $tag (у тебя $cur).\n$body"
+                                updateUrl = apkUrl
+                            }
+                            com.neuropocket.app.core.UpdatePolicy.Decision.UNKNOWN ->
+                                updateInfo = "Не смог сравнить версии (у тебя $cur, в релизе $tag)."
                         }
                         updateBusy = false
                     }
@@ -2461,6 +2595,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun downloadUpdate() {
         val url = updateUrl ?: return
+        // Red-team E: update URL приходит из GitHub API (https); guard на всякий случай.
+        if (!com.neuropocket.app.core.NetworkPolicy.isUrlAllowed(url)) {
+            status = com.neuropocket.app.core.NetworkPolicy.blockedReason(url)
+            return
+        }
         try {
             val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             val req = DownloadManager.Request(Uri.parse(url)).apply {
@@ -2481,6 +2620,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         try {
             val f = java.io.File(ctx.getExternalFilesDir(null), "updates/NeuroPocket-update.apk")
             if (!f.exists()) { status = "Файл обновления не найден."; return }
+            // Red-team D: проверка ДО install prompt. При failure — installer НЕ
+            // открываем, файл карантинируем (удаляем), показываем понятную ошибку.
+            // Android package signature enforcement остаётся финальным барьером
+            // на стороне установщика; это defense-in-depth + UX.
+            val problem = verifyUpdateApk(f)
+            if (problem != null) {
+                try { f.delete() } catch (_: Exception) { }
+                updateUrl = null
+                updateInfo = "Обновление отклонено: $problem"
+                status = "Обновление отклонено: $problem"
+                return
+            }
             val uri = androidx.core.content.FileProvider.getUriForFile(
                 ctx, ctx.packageName + ".fileprovider", f)
             val it = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
@@ -2491,6 +2642,69 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             ctx.startActivity(it)
         } catch (e: Exception) {
             status = "Не открылось: разреши «установку из неизвестных источников»."
+        }
+    }
+
+    /**
+     * Red-team D: возвращает null если APK можно ставить, иначе причину отказа.
+     * Проверяет: packageName, versionCode (без downgrade), versionName новее
+     * (SemVer), подпись совпадает с установленной (где API позволяет).
+     * Trusted SHA-256 сверяется только если manifest содержит digest для APK;
+     * сейчас его нет (APK меняется каждый релиз) — trust anchor остаётся
+     * GitHub TLS + проверка ниже + signature enforcement установщика.
+     */
+    fun verifyUpdateApk(f: java.io.File): String? {
+        return try {
+            val pm = ctx.packageManager
+            val archive = pm.getPackageArchiveInfo(
+                f.absolutePath, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+            ) ?: return "не смог прочитать APK (битый файл?)"
+            val expectedPkg = ctx.packageName.removeSuffix(".debug")
+            val archivePkg = archive.packageName ?: return "в APK нет packageName"
+            if (archivePkg != expectedPkg && archivePkg != ctx.packageName) {
+                return "чужой пакет: $archivePkg (ожидался $expectedPkg)"
+            }
+            val cur = try {
+                pm.getPackageInfo(ctx.packageName, 0)
+            } catch (_: Exception) { return "не смог прочитать установленную версию" }
+            val archiveCode = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                archive.longVersionCode
+            } else {
+                @Suppress("DEPRECATION") archive.versionCode.toLong()
+            }
+            val curCode = if (android.os.Build.VERSION.SDK_INT >= 28) {
+                cur.longVersionCode
+            } else {
+                @Suppress("DEPRECATION") cur.versionCode.toLong()
+            }
+            if (archiveCode <= curCode) {
+                return "не новее установленного (code $archiveCode <= $curCode): downgrade запрещён"
+            }
+            val archiveName = archive.versionName ?: ""
+            val curName = cur.versionName ?: ""
+            if (!com.neuropocket.app.core.UpdatePolicy.shouldOffer(archiveName, curName)) {
+                return "версия $archiveName не новее $curName"
+            }
+            // Подпись: пересечение подписантов архива с историей установленной.
+            // (учитывает key rotation: достаточно одного общего сертификата)
+            val aSign = try { archive.signingInfo } catch (_: Exception) { null }
+                ?: return "в APK нет подписи"
+            val iSign = try {
+                pm.getPackageInfo(
+                    ctx.packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+                ).signingInfo
+            } catch (_: Exception) { null } ?: return "не смог прочитать свою подпись"
+            fun sigSet(arr: Array<android.content.pm.Signature>?): Set<String> =
+                arr?.map { it.toCharsString() }?.toSet() ?: emptySet()
+            val archiveSigs = sigSet(aSign.apkContentsSigners)
+            if (archiveSigs.isEmpty()) return "в APK нет подписи"
+            val installedSigs = sigSet(iSign.apkContentsSigners) + sigSet(iSign.signingCertificateHistory)
+            if (archiveSigs.intersect(installedSigs).isEmpty()) {
+                return "подпись APK не совпадает с установленной"
+            }
+            null
+        } catch (e: Exception) {
+            "ошибка проверки: ${e.message?.take(100)}"
         }
     }
 
@@ -2583,6 +2797,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun downloadModel(info: AiModelInfo) {
+        // Red-team E: guard для любого URL, уходящего в DownloadManager
+        // (каталог — pinned https, импорту это не мешает; блок только при http-downgrade).
+        if (!com.neuropocket.app.core.NetworkPolicy.isUrlAllowed(info.url)) {
+            status = com.neuropocket.app.core.NetworkPolicy.blockedReason(info.url)
+            return
+        }
         try {
             val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             val req = DownloadManager.Request(Uri.parse(info.url)).apply {
@@ -2660,7 +2880,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private var resetArmed = false
 
-    /** P0.5: сброс по явному подтверждению диалога (один вызов). */
+    /**
+     * P0.5: сброс по явному подтверждению диалога (один вызов).
+     *
+     * Семантика reset (единственный режим):
+     * УДАЛЯЕТ: DataStore-настройки/чаты/персоны/лента/провайдеры (через Store.clearAll),
+     *   ключи API (KeyVault.clear), RAG-индекс, WorkManager-автоматизацию
+     *   (np-autopost, np-autobackup — явный cancel, не полагаемся на reload).
+     * СОХРАНЯЕТ на диске: скачанные модели (models/), голоса (voices/),
+     *   заметки .md (notes/), картинки (pictures/), аватары (avatars/),
+     *   native-движки (internal voice_engine/sd_engine), скачанные бэкапы.
+     * Орфаны после reset: старые аватары/картинки/заметки остаются файлами
+     * и пересканируются (refreshModelFiles/refreshGallery) — это задокументировано
+     * в диалоге и статусе, а не "как новое".
+     */
     fun factoryResetConfirmed() { viewModelScope.launch(Dispatchers.IO) {
         resetArmed = false
         doFactoryReset()
@@ -2683,6 +2916,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun doFactoryReset() = withContext(Dispatchers.IO) {
         try {
+            // Red-team A: явная отмена фоновой автоматизации. WorkManager хранит
+            // очередь отдельно от DataStore, поэтому полагаться только на reload()
+            // (который перечитает сброшенные флаги) хрупко: воркер может сработать
+            // между clearAll и перепланированием. Отменяем явно и сразу.
+            try {
+                val wm = androidx.work.WorkManager.getInstance(ctx)
+                wm.cancelUniqueWork("np-autopost")
+                wm.cancelUniqueWork("np-autobackup")
+            } catch (_: Exception) { }
             try { llama.unload() } catch (_: Exception) { }
             try { WhisperNative.unload() } catch (_: Exception) { }
             try { LlamaNative.unloadVision() } catch (_: Exception) { }

@@ -35,41 +35,53 @@ android {
         }
     }
 
+    // P0.9 + red-team I: FAIL CLOSED без хрупкого sniffing имён тасков.
+    // Секреты читаются в nullable-переменные уровня android-блока; проверка —
+    // в gradle.taskGraph.whenReady по ТОЧНЫМ именам packaging-тасков, а не по
+    // подстроке в startParameter (testReleaseUnitTest и т.п. секретов не требуют).
+    val kp = Properties()
+    rootProject.file("keystore.properties").takeIf { it.exists() }?.inputStream()?.use { kp.load(it) }
+    fun optSecret(name: String, env: String): String? =
+        kp.getProperty(name) ?: System.getenv(env)
+    val relStoreFile = optSecret("storeFile", "NP_STORE_FILE")
+    val relStorePass = optSecret("storePassword", "NP_STORE_PASS")
+    val relKeyAlias = optSecret("keyAlias", "NP_KEY_ALIAS")
+    val relKeyPass = optSecret("keyPassword", "NP_KEY_PASS")
+    val releaseSigningComplete = listOf(relStoreFile, relStorePass, relKeyAlias, relKeyPass).all { !it.isNullOrBlank() }
+
     signingConfigs {
         create("release") {
-            // P0.9: FAIL CLOSED — никаких fallback-паролей в репозитории.
-            // Release требует реальный keystore: keystore.properties или env.
-            // Debug/unit-тесты работают без него; ошибка — только при сборке release.
-            val kp = Properties()
-            rootProject.file("keystore.properties").takeIf { it.exists() }?.inputStream()?.use { kp.load(it) }
-            val wantsRelease = gradle.startParameter.taskNames.any {
-                it.contains("Release", ignoreCase = true)
+            // Никаких fallback-паролей в репозитории. Если секретов нет —
+            // конфиг остаётся пустым, а сборка release упадёт с понятной
+            // ошибкой в taskGraph.whenReady ниже (а не с cryptic keystore error).
+            if (releaseSigningComplete) {
+                storeFile = file(relStoreFile!!)
+                storePassword = relStorePass
+                keyAlias = relKeyAlias
+                keyPassword = relKeyPass
             }
-            fun req(name: String, env: String): String? {
-                val v = kp.getProperty(name) ?: System.getenv(env)
-                if (v == null && wantsRelease) throw GradleException(
-                    "Release signing not configured: missing $name " +
-                        "(keystore.properties or env $env). " +
-                        "Debug build works without it; release FAILS CLOSED (P0.9)."
-                )
-                return v
-            }
-            val sf = req("storeFile", "NP_STORE_FILE")
-            val sp = req("storePassword", "NP_STORE_PASS")
-            val ka = req("keyAlias", "NP_KEY_ALIAS")
-            val kpw = req("keyPassword", "NP_KEY_PASS")
-            if (sf != null && sp != null && ka != null && kpw != null) {
-                storeFile = file(sf)
-                storePassword = sp
-                keyAlias = ka
-                keyPassword = kpw
-                if (wantsRelease && !storeFile!!.exists()) throw GradleException(
-                    "Release keystore file not found: ${storeFile}. " +
-                        "Create it per docs/BUILD.md (never commit it)."
-                )
-            } else if (wantsRelease) {
-                throw GradleException("Release signing incomplete (P0.9 fail-closed).")
-            }
+        }
+    }
+
+    gradle.taskGraph.whenReady {
+        // Точные имена AGP packaging-тасков (assembleRelease тянет packageRelease).
+        val signsApk = allTasks.any { t ->
+            t.name == "packageRelease" ||
+                t.name == "packageReleaseUniversalApk" ||
+                t.name == "bundleRelease" ||
+                t.name == "installRelease"
+        }
+        if (signsApk) {
+            if (!releaseSigningComplete) throw GradleException(
+                "Release signing not configured (P0.9 fail-closed): need keystore.properties " +
+                    "(storeFile/storePassword/keyAlias/keyPassword) or env " +
+                    "NP_STORE_FILE/NP_STORE_PASS/NP_KEY_ALIAS/NP_KEY_PASS. " +
+                    "Debug and unit tests work without it."
+            )
+            val sf = file(relStoreFile!!)
+            if (!sf.exists()) throw GradleException(
+                "Release keystore file not found: $sf. Create it per docs/BUILD.md (never commit it)."
+            )
         }
     }
 
