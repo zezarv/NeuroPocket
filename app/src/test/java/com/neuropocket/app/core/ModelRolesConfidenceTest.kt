@@ -32,8 +32,30 @@ class ModelRolesConfidenceTest {
         assertEquals(ModelRole.TEXT_LLM, ModelRoles.classify("custom-model.gguf"))
     }
     @Test fun `describeFile honest about heuristic`() {
-        assertTrue(ModelRoles.describeFile("model.gguf").contains("не проверено"))
-        assertFalse(ModelRoles.describeFile("ggml-base.bin").contains("не проверено"))
+        // generic GGUF вне каталога: тип НЕ определён (red-team H contract)
+        assertEquals("GGUF (тип не определён)", ModelRoles.describeFile("model.gguf"))
+        assertEquals("whisper (STT)", ModelRoles.describeFile("ggml-base.bin"))
+    }
+    @Test fun `roleForFile contract catalog then markers then ambiguous`() {
+        val catalog = mapOf(
+            "Llama-3.2-3B-Instruct-Q4_K_M.gguf" to "text",
+            "mmproj-Qwen2-VL-2B-Instruct-Q8_0.gguf" to "mmproj"
+        )
+        // 1. catalog authoritative (даже если имя неинформативно)
+        assertEquals(
+            ModelRole.TEXT_LLM,
+            ModelRoles.roleForFile("Llama-3.2-3B-Instruct-Q4_K_M.gguf", catalog)
+        )
+        // 2. confident markers без каталога
+        assertEquals(
+            ModelRole.MM_PROJECTOR,
+            ModelRoles.roleForFile("mmproj-Qwen2-VL-2B-Instruct-Q8_0.gguf")
+        )
+        assertEquals(ModelRole.WHISPER, ModelRoles.roleForFile("ggml-base.bin"))
+        // 3. imported generic GGUF -> AMBIGUOUS, не TEXT_LLM
+        assertEquals(ModelRole.AMBIGUOUS, ModelRoles.roleForFile("model.gguf"))
+        assertEquals(ModelRole.AMBIGUOUS, ModelRoles.roleForFile("my-llama.gguf", catalog))
+        assertEquals(ModelRole.UNKNOWN, ModelRoles.roleForFile("notes.txt"))
     }
     @Test fun `catalog kinds all authoritative`() {
         // каждая запись каталога обязана маппиться в известную роль

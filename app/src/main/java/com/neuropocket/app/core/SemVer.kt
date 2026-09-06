@@ -47,27 +47,42 @@ object SemVer {
     }
 
     private fun comparePre(a: String, b: String): Int {
+        // SemVer §11: identifiers слева направо; numeric < alphanumeric;
+        // numeric — численно; alphanumeric — ASCII; если все равные —
+        // больший набор полей имеет ВЫСШИЙ precedence (rc.1 < rc.1.1).
         if (a == b) return 0
         val ta = a.split('.', '-', '_')
         val tb = b.split('.', '-', '_')
-        val n = maxOf(ta.size, tb.size)
+        val n = minOf(ta.size, tb.size)
         for (i in 0 until n) {
-            val x = ta.getOrElse(i) { "" }
-            val y = tb.getOrElse(i) { "" }
+            val x = ta[i]
+            val y = tb[i]
             if (x == y) continue
             val xn = x.toIntOrNull()
             val yn = y.toIntOrNull()
             if (xn != null && yn != null) {
-                if (xn != yn) return xn.compareTo(yn) else continue
+                val c = xn.compareTo(yn)
+                if (c != 0) return c else continue
             }
-            // числовой идентификатор < строкового? по semver numeric < alphanumeric.
-            // Упрощённо: сравниваем лексикографически, но числа меньше строк.
-            if (xn != null) return -1
+            if (xn != null) return -1 // numeric < alphanumeric
             if (yn != null) return 1
             val c = x.compareTo(y)
             if (c != 0) return c
         }
         return ta.size.compareTo(tb.size)
+    }
+
+    private val STRICT = Regex(
+        """^v?\d+(\.\d+)*(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$"""
+    )
+
+    /**
+     * Red-team G: malformed version не молча нормализуется, а помечается.
+     * UpdatePolicy возвращает UNKNOWN для невалидных входов.
+     */
+    fun isValid(v: String?): Boolean {
+        if (v.isNullOrBlank()) return false
+        return STRICT.matches(v.trim())
     }
 
     /** true если latest строго новее current. */

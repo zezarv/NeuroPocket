@@ -23,7 +23,51 @@ class RemoteEngine(
     var topP: Float = 0.9f,
     var timeoutSec: Int = 120
 ) : AiEngine {
-    private val http: OkHttpClient get() = NetHttp.clientFor(timeoutSec)
+    private val httpNr: OkHttpClient get() = NetHttp.noRedirects(timeoutSec)
+
+    /**
+     * Red-team L: ручные редиректы с проверкой КАЖДОГО назначения через
+     * RedirectPolicy. Авто-follow выключен, чтобы LAN http endpoint не мог
+     * молча увести на public http. POST: только 307/308 (метод+тело целы);
+     * 301/302/303 для API — ошибка. GET: все коды. Лимит 3 hop.
+     */
+    private fun execChecked(first: Request, isPost: Boolean): okhttp3.Response {
+        var req = first
+        var hops = 0
+        while (true) {
+            val call = httpNr.newCall(req)
+            activeCall = call
+            val resp: okhttp3.Response = try {
+                call.execute()
+            } finally {
+                if (activeCall === call) activeCall = null
+            }
+            val code = resp.code
+            if (!com.neuropocket.app.core.RedirectPolicy.isRedirect(code) || hops >= 3) {
+                return resp
+            }
+            if (isPost && (code == 301 || code == 302 || code == 303)) {
+                resp.close()
+                throw Exception("сервер вернул redirect $code для POST — без автоследования (настрой прямой URL)")
+            }
+            val loc = resp.header("Location")
+            resp.close()
+            val from = req.url.toString()
+            when (val d = com.neuropocket.app.core.RedirectPolicy.check(from, loc)) {
+                is com.neuropocket.app.core.RedirectPolicy.Decision.Block ->
+                    throw Exception("redirect заблокирован: ${d.reason.take(160)}")
+                is com.neuropocket.app.core.RedirectPolicy.Decision.Allow -> {
+                    val nb = Request.Builder().url(d.url)
+                    for (i in 0 until req.headers.size) {
+                        nb.header(req.headers.name(i), req.headers.value(i))
+                    }
+                    nb.method(req.method, req.body)
+                    req = nb.build()
+                    hops++
+                }
+            }
+        }
+    }
     override val engineName: String get() = "${provider.name} (${provider.model.ifBlank { "?" }})"
     override val isLocalReal = false
 
@@ -83,13 +127,7 @@ class RemoteEngine(
         val b = Request.Builder().url("$base/chat/completions").post(rb)
         if (provider.apiKey.isNotBlank()) b.header("Authorization", "Bearer ${provider.apiKey}")
         if (acceptSse) b.header("Accept", "text/event-stream")
-        val call = http.newCall(b.build())
-        activeCall = call
-        try {
-            return call.execute()
-        } finally {
-            if (activeCall === call) activeCall = null
-        }
+        return execChecked(b.build(), isPost = true)
     }
 
     private fun streamChat(base: String, history: List<ChatMessage>, persona: Persona, userText: String, onToken: (String) -> Unit): String {
@@ -143,18 +181,12 @@ class RemoteEngine(
         val model = provider.model.ifBlank { "openai" }
         val url = "https://text.pollinations.ai/${URLEncoder.encode(prompt, "UTF-8")}?model=$model"
         val req = Request.Builder().url(url).get().build()
-        val call = http.newCall(req)
-        activeCall = call
-        try {
-            call.execute().use { resp ->
-                if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
-                val out = (resp.body?.string() ?: "").trim()
-                if (out.isEmpty()) throw Exception("пустой ответ")
-                onToken(out)
-                return out
-            }
-        } finally {
-            if (activeCall === call) activeCall = null
+        execChecked(req, isPost = false).use { resp ->
+            if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
+            val out = (resp.body?.string() ?: "").trim()
+            if (out.isEmpty()) throw Exception("пустой ответ")
+            onToken(out)
+            return out
         }
     }
 
@@ -192,10 +224,39 @@ class RemoteEngine(
                 val base = p.baseUrl.trim().trimEnd('/')
                 val b = Request.Builder().url("$base/models").get()
                 if (p.apiKey.isNotBlank()) b.header("Authorization", "Bearer ${p.apiKey}")
-                NetHttp.clientFor(30).newCall(b.build()).execute().use { resp ->
-                    if (!resp.isSuccessful) throw Exception("HTTP ${resp.code}")
-                    val arr = JSONObject(resp.body?.string() ?: "").optJSONArray("data") ?: JSONArray()
-                    return (0 until arr.length()).map { arr.getJSONObject(it).getString("id") }.sorted()
+                // Red-team L: тот же ручной redirect-контроль (GET, до 3 hop).
+                var req = b.build()
+                var hops = 0
+                while (true) {
+                    val call = NetHttp.noRedirects(30).newCall(req)
+                    activeCall = call
+                    val resp = try {
+                        call.execute()
+                    } finally {
+                        if (activeCall === call) activeCall = null
+                    }
+                    if (!com.neuropocket.app.core.RedirectPolicy.isRedirect(resp.code) || hops >= 3) {
+                        resp.use { r ->
+                            if (!r.isSuccessful) throw Exception("HTTP ${r.code}")
+                            val arr = JSONObject(r.body?.string() ?: "").optJSONArray("data") ?: JSONArray()
+                            return (0 until arr.length()).map { arr.getJSONObject(it).getString("id") }.sorted()
+                        }
+                    }
+                    val loc = resp.header("Location")
+                    val from = req.url.toString()
+                    resp.close()
+                    when (val d = com.neuropocket.app.core.RedirectPolicy.check(from, loc)) {
+                        is com.neuropocket.app.core.RedirectPolicy.Decision.Block ->
+                            throw Exception("redirect заблокирован: ${d.reason.take(160)}")
+                        is com.neuropocket.app.core.RedirectPolicy.Decision.Allow -> {
+                            val nb = Request.Builder().url(d.url)
+                            for (i in 0 until req.headers.size) {
+                                nb.header(req.headers.name(i), req.headers.value(i))
+                            }
+                            req = nb.get().build()
+                            hops++
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 throw Exception(shortErr(e as? Exception ?: Exception(e.toString())))

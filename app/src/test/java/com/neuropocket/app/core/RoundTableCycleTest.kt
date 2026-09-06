@@ -36,4 +36,14 @@ class RoundTableCycleTest {
         // а новый стол без append — чистый
         assertEquals(fresh, RoundTableLogic.mergeTurns(seedTurns, fresh, append = false))
     }
+
+    @Test fun `long discussion seed prefers fresh turns`() {
+        // Red-team I: encore длинной дискуссии реагирует на последние turns
+        val many = (1..30).map { i -> turn(if (i % 2 == 0) "B" else "A", "реплика номер $i") }
+        val seed = RoundTableLogic.buildSeedContext(many, limitChars = 300)
+        assertTrue(seed.contains("реплика номер 30"))
+        assertTrue(seed.contains("реплика номер 29"))
+        // старые вытеснены лимитом
+        assertFalse(seed.contains("реплика номер 1\n"))
+    }
 }

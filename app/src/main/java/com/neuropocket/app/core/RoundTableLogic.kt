@@ -20,7 +20,11 @@ object RoundTableLogic {
     fun mergeTurns(existing: List<RoundTurn>, fresh: List<RoundTurn>, append: Boolean): List<RoundTurn> =
         if (append) existing + fresh else fresh.toList()
 
-    /** Контекст предыдущих turns для новых участников (seed для промпта). */
+    /**
+     * Контекст предыдущих turns для новых участников (seed для промпта).
+     * Red-team I: bounded context предпочитает СВЕЖУЮ историю (takeLast),
+     * чтобы encore реагировал на последние turns длинной дискуссии.
+     */
     fun buildSeedContext(turns: List<RoundTurn>, limitChars: Int = 2000): String =
-        turns.joinToString("\n") { it.name + ": " + it.text }.take(limitChars)
+        turns.takeLast(20).joinToString("\n") { it.name + ": " + it.text }.takeLast(limitChars)
 }

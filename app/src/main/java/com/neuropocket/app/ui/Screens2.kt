@@ -372,8 +372,8 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.secondary)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = { vm.loadFileToRam(f) }) { Text("В RAM") }
-                                OutlinedButton(onClick = { vm.loadFileToRam(f, 1024) }) { Text("RAM 1k") }
+                                Button(onClick = { vm.requestLoadFile(f) }) { Text("В RAM") }
+                                OutlinedButton(onClick = { vm.requestLoadFile(f, 1024) }) { Text("RAM 1k") }
                                 Spacer(Modifier.weight(1f))
                                 TextButton(onClick = { confirmDelete = f }) { Text("Удалить") }
                             }
@@ -429,26 +429,26 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                     Column(Modifier.padding(12.dp)) {
                         Text("Голоса (sherpa/piper, офлайн)", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "Движок: " + when (vm.voiceEngineState) {
-                                "ok" -> "готов"
-                                "file" -> "файл есть"
-                                "downloading" -> "скачиваю…"
-                                "verifying" -> "проверяю (size/SHA-256)…"
-                                "installing" -> "устанавливаю…"
-                                "error" -> "ошибка — можно повторить"
-                                else -> "нужно скачать (~10 МБ)"
-                            } + " • " + vm.ttsInfo,
+                            "Движок: " + com.neuropocket.app.core.VoiceEngine.statusRu(vm.voiceEngineState) +
+                                " • " + vm.ttsInfo,
                             style = MaterialTheme.typography.bodySmall
                         )
-                        if (vm.voiceEngineState == "missing" || vm.voiceEngineState == "error") {
-                            if (vm.voiceEngineState == "error") {
-                                Text(vm.status, style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.error)
+                        if (vm.voiceEngineState == com.neuropocket.app.core.VoiceEngineState.MISSING ||
+                            vm.voiceEngineState == com.neuropocket.app.core.VoiceEngineState.ERROR
+                        ) {
+                            if (vm.voiceEngineState == com.neuropocket.app.core.VoiceEngineState.ERROR) {
+                                Text(
+                                    vm.voiceEngineError ?: vm.status,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (vm.voiceEngineState == "error") {
+                                if (vm.voiceEngineState == com.neuropocket.app.core.VoiceEngineState.ERROR) {
                                     Button(onClick = { vm.retryVoiceEngine() },
                                         modifier = Modifier.weight(1f)) { Text("Повторить") }
+                                    OutlinedButton(onClick = { vm.deleteVoiceEngine() },
+                                        modifier = Modifier.weight(1f)) { Text("Удалить движок") }
                                 } else if (vm.voiceEngineUrl == null) {
                                     OutlinedButton(onClick = { vm.resolveVoiceEngineUrl() },
                                         enabled = !vm.voiceEngineBusy, modifier = Modifier.weight(1f)) {
@@ -463,9 +463,9 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                             DlRow(vm, "voice-engine-arm64.zip")
                             Spacer(Modifier.height(4.dp))
                         }
-                        if (vm.voiceEngineState == "downloading" ||
-                            vm.voiceEngineState == "verifying" ||
-                            vm.voiceEngineState == "installing"
+                        if (vm.voiceEngineState == com.neuropocket.app.core.VoiceEngineState.DOWNLOADING ||
+                            vm.voiceEngineState == com.neuropocket.app.core.VoiceEngineState.VERIFYING ||
+                            vm.voiceEngineState == com.neuropocket.app.core.VoiceEngineState.INSTALLING
                         ) {
                             LinearProgressIndicator(Modifier.fillMaxWidth())
                             DlRow(vm, "voice-engine-arm64.zip")
@@ -599,24 +599,20 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
             }
         }
     }
-    // P0.6 + red-team F: подтверждение удаления с именем/размером/типом.
+    // P0.6 + red-team F/K: подтверждение удаления с именем/размером/типом.
+    // Размер директории — bounded recursive sum; loaded — canonical exact path.
     confirmDelete?.let { f ->
-        val sizeMb = try { f.length() / 1048576 } catch (_: Exception) { -1 }
-        val loadedMark = when {
-            vm.loadedTextPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
-            vm.loadedWhisperPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
-            vm.loadedSdPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
-            vm.loadedVisionPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
-            vm.loadedEmbedPath?.endsWith(f.name) == true -> "\nСейчас загружен в RAM — будет выгружен."
-            else -> ""
-        }
+        val sizeMb = vm.displaySizeMb(f)
+        val loadedMark = if (vm.isLoadedPath(f)) {
+            "\nСейчас загружен в RAM — будет выгружен."
+        } else ""
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             title = { Text("Удалить файл?") },
             text = {
                 Text(
                     "Имя: ${f.name}\n" +
-                        "Размер: ${if (sizeMb >= 0) "$sizeMb МБ" else "?"} \n" +
+                        "Размер: $sizeMb МБ\n" +
                         "Тип: ${com.neuropocket.app.core.ModelRoles.describeFile(f.name)}$loadedMark"
                 )
             },
@@ -624,6 +620,24 @@ fun ModelsScreen(vm: AppViewModel, onOpenProviders: () -> Unit = {}) {
                 Button(onClick = { vm.deleteModelFile(f); confirmDelete = null }) { Text("Удалить") }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Отмена") } }
+        )
+    }
+    // Red-team H: explicit confirmation для ambiguous GGUF (не автозагрузка).
+    vm.pendingAmbiguousLoad?.let { f ->
+        AlertDialog(
+            onDismissRequest = { vm.dismissAmbiguousLoad() },
+            title = { Text("Неизвестный тип GGUF") },
+            text = {
+                Text(
+                    "Тип файла ${f.name} не определён (нет в каталоге, имя без маркеров).\n\n" +
+                        "Загрузить как текстовую LLM? Если это mmproj/эмбеддинги " +
+                        "под другим именем — загрузка просто даст ошибку, состояние не портится."
+                )
+            },
+            confirmButton = {
+                Button(onClick = { vm.confirmAmbiguousLoad() }) { Text("Загрузить как текст") }
+            },
+            dismissButton = { TextButton(onClick = { vm.dismissAmbiguousLoad() }) { Text("Отмена") } }
         )
     }
 }

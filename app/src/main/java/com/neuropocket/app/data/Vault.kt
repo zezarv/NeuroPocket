@@ -2,16 +2,11 @@ package com.neuropocket.app.data
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Base64
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.neuropocket.app.core.BackupCrypto
 import org.json.JSONObject
 import java.io.File
-import javax.crypto.Cipher
-import javax.crypto.SecretKeyFactory
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * Ключи API — только в шифрованном хранилище (Android Keystore),
@@ -50,8 +45,68 @@ object KeyVault {
 /**
  * Бэкап всего состояния в один JSON (папка models/).
  * Ключи API — только в AES-GCM блоке под паролем, иначе не включаются.
+ *
+ * Red-team J: ЕДИНСТВЕННАЯ crypto-реализация — core.BackupCrypto
+ * (её же тестируют unit tests). Здесь только JSON-каркас + vault/file IO.
+ * Wire format НЕ менялся: те же поля app/v/data/keysSalt/keysIv/keysData/
+ * salt/iv/data; settings — JSONObject (старый String(JSON) читается в parse).
+ * Base64: java.util (minSdk 28) вместо android.util — wire-совместимо
+ * (тот же алфавит/паддинг, NO_WRAP) и JVM-testable.
  */
 object Backup {
+    /**
+     * Чистый каркас plain-бэкапа (без Context — тестируем).
+     * @param keysJson собранный JSON ключей API или null (без ключей)
+     * @param keysPassword пароль для keys-блока (игнорируется при keysJson==null)
+     */
+    fun buildPlainRoot(
+        personas: String,
+        sessions: String,
+        msgmap: String,
+        chars: String,
+        posts: String,
+        comments: String,
+        providers: String,
+        settings: Map<String, Any>,
+        keysJson: String?,
+        keysPassword: String
+    ): JSONObject {
+        val root = JSONObject()
+        root.put("app", "NeuroPocket")
+        root.put("v", 1)
+        val data = JSONObject()
+        data.put("personas", personas)
+        data.put("sessions", sessions)
+        data.put("msgmap", msgmap)
+        data.put("chars", chars)
+        data.put("posts", posts)
+        data.put("comments", comments)
+        data.put("providers", providers)
+        // P0.4: новый корректный формат — settings как JSONObject (не String).
+        // Старые бэкапы со String(JSON) читаем в parse() для backward compat.
+        data.put("settings", com.neuropocket.app.core.BackupSettings.encode(settings))
+        root.put("data", data)
+        if (keysJson != null && keysPassword.length >= 4) {
+            val sealed = BackupCrypto.encrypt(keysJson.toByteArray(Charsets.UTF_8), keysPassword)
+            root.put("keysSalt", sealed.saltB64)
+            root.put("keysIv", sealed.ivB64)
+            root.put("keysData", sealed.dataB64)
+        }
+        return root
+    }
+
+    /** Чистая обёртка full-шифрования (без Context — тестируема). */
+    fun wrapEncrypted(root: JSONObject, fullPassword: String): JSONObject {
+        val sealed = BackupCrypto.encrypt(root.toString().toByteArray(Charsets.UTF_8), fullPassword)
+        val outer = JSONObject()
+        outer.put("app", "NeuroPocket")
+        outer.put("v", 2)
+        outer.put("salt", sealed.saltB64)
+        outer.put("iv", sealed.ivB64)
+        outer.put("data", sealed.dataB64)
+        return outer
+    }
+
     fun make(
         ctx: Context,
         personas: String,
@@ -66,22 +121,7 @@ object Backup {
         password: String,
         fullPassword: String = ""
     ): File {
-        val root = JSONObject()
-        root.put("app", "NeuroPocket")
-        root.put("v", 1)
-        val data = JSONObject()
-        data.put("personas", personas)
-        data.put("sessions", sessions)
-        data.put("msgmap", msgmap)
-        data.put("chars", chars)
-        data.put("posts", posts)
-        data.put("comments", comments)
-        data.put("providers", providers)
-        // P0.4: новый корректный формат — settings как JSONObject (не String).
-        // Старые бэкапы со String(JSON) читаем в parse() для backward compat.
-        val st = com.neuropocket.app.core.BackupSettings.encode(settings)
-        data.put("settings", st)
-        root.put("data", data)
+        var keysJson: String? = null
         if (withKeys && password.length >= 4) {
             val keys = JSONObject()
             // соберём ключи из vault по id из providers
@@ -90,22 +130,15 @@ object Backup {
                 val id = prov.getJSONObject(i).optString("id")
                 KeyVault.get(ctx, id)?.let { if (it.isNotEmpty()) keys.put(id, it) }
             }
-            val salt = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
-            val enc = aesEncrypt(keys.toString().toByteArray(Charsets.UTF_8), password, salt)
-            root.put("keysSalt", Base64.encodeToString(salt, Base64.NO_WRAP))
-            root.put("keysIv", Base64.encodeToString(enc.first, Base64.NO_WRAP))
-            root.put("keysData", Base64.encodeToString(enc.second, Base64.NO_WRAP))
+            keysJson = keys.toString()
         }
+        val root = buildPlainRoot(
+            personas, sessions, msgmap, chars, posts, comments, providers,
+            settings, keysJson, password
+        )
         if (fullPassword.length >= 4) {
             // шифруем ВЕСЬ бэкап целиком (включая ключи, если их добавили выше)
-            val salt = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
-            val enc = aesEncrypt(root.toString().toByteArray(Charsets.UTF_8), fullPassword, salt)
-            val outer = JSONObject()
-            outer.put("app", "NeuroPocket")
-            outer.put("v", 2)
-            outer.put("salt", Base64.encodeToString(salt, Base64.NO_WRAP))
-            outer.put("iv", Base64.encodeToString(enc.first, Base64.NO_WRAP))
-            outer.put("data", Base64.encodeToString(enc.second, Base64.NO_WRAP))
+            val outer = wrapEncrypted(root, fullPassword)
             val f = File(ctx.getExternalFilesDir(null), "models/NeuroPocket-backup-${System.currentTimeMillis()}.enc.json")
             f.writeText(outer.toString())
             return f
@@ -126,11 +159,11 @@ object Backup {
         require(root.optString("app") == "NeuroPocket") { "не наш бэкап" }
         if (root.optInt("v") == 2) {
             require(password.length >= 4) { "бэкап зашифрован: нужен пароль" }
-            val salt = Base64.decode(root.getString("salt"), Base64.NO_WRAP)
-            val iv = Base64.decode(root.getString("iv"), Base64.NO_WRAP)
-            val cipher = Base64.decode(root.getString("data"), Base64.NO_WRAP)
             try {
-                root = JSONObject(String(aesDecrypt(cipher, password, salt, iv), Charsets.UTF_8))
+                val sealed = BackupCrypto.Sealed(
+                    root.getString("salt"), root.getString("iv"), root.getString("data")
+                )
+                root = JSONObject(String(BackupCrypto.decrypt(sealed, password), Charsets.UTF_8))
             } catch (_: Exception) {
                 throw Exception("неверный пароль или битый файл")
             }
@@ -140,12 +173,16 @@ object Backup {
         val keys = mutableMapOf<String, String>()
         if (root.has("keysData")) {
             require(password.length >= 4) { "бэкап с ключами: нужен пароль" }
-            val salt = Base64.decode(root.getString("keysSalt"), Base64.NO_WRAP)
-            val iv = Base64.decode(root.getString("keysIv"), Base64.NO_WRAP)
-            val cipher = Base64.decode(root.getString("keysData"), Base64.NO_WRAP)
-            val plain = aesDecrypt(cipher, password, salt, iv)
-            val jo = JSONObject(String(plain, Charsets.UTF_8))
-            for (k in jo.keys()) keys[k] = jo.getString(k)
+            try {
+                val sealed = BackupCrypto.Sealed(
+                    root.getString("keysSalt"), root.getString("keysIv"), root.getString("keysData")
+                )
+                val jo = JSONObject(String(BackupCrypto.decrypt(sealed, password), Charsets.UTF_8))
+                for (k in jo.keys()) keys[k] = jo.getString(k)
+            } catch (e: Exception) {
+                // неверный пароль keys-блока неотличим от битого файла
+                throw Exception("неверный пароль или битый блок ключей")
+            }
         }
         val st: Map<String, String> = com.neuropocket.app.core.BackupSettings.decode(data)
         return Parsed(
@@ -155,24 +192,5 @@ object Backup {
             data.optString("providers", "[]"),
             st, keys
         )
-    }
-
-    private fun aesKey(password: String, salt: ByteArray): SecretKeySpec {
-        val f = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-        val spec = PBEKeySpec(password.toCharArray(), salt, 120_000, 256)
-        return SecretKeySpec(f.generateSecret(spec).encoded, "AES")
-    }
-
-    private fun aesEncrypt(data: ByteArray, password: String, salt: ByteArray): Pair<ByteArray, ByteArray> {
-        val iv = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.ENCRYPT_MODE, aesKey(password, salt), GCMParameterSpec(128, iv))
-        return iv to c.doFinal(data)
-    }
-
-    private fun aesDecrypt(data: ByteArray, password: String, salt: ByteArray, iv: ByteArray): ByteArray {
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(Cipher.DECRYPT_MODE, aesKey(password, salt), GCMParameterSpec(128, iv))
-        return c.doFinal(data)
     }
 }

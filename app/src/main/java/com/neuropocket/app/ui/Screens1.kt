@@ -843,14 +843,25 @@ fun ToolsScreen(
                         Text("Фото (SD локально, 512px)", style = MaterialTheme.typography.titleSmall)
                         Text(vm.sdInfo + " • CPU: минуты на кадр, не сворачивай", style = MaterialTheme.typography.bodySmall)
                         Spacer(Modifier.height(6.dp))
-                        Text("Движок SD: " + when (vm.sdEngineState) {
-                            "ok" -> "встроен/готов"
-                            "file" -> "файл есть"
-                            else -> "нужно скачать (51 МБ)"
-                        }, style = MaterialTheme.typography.labelSmall)
-                        if (vm.sdEngineState == "missing") {
+                        Text("Движок SD: " + com.neuropocket.app.core.SdEngine.statusRu(vm.sdEngineState),
+                            style = MaterialTheme.typography.labelSmall)
+                        if (vm.sdEngineState == com.neuropocket.app.core.SdEngineState.MISSING ||
+                            vm.sdEngineState == com.neuropocket.app.core.SdEngineState.ERROR
+                        ) {
+                            if (vm.sdEngineState == com.neuropocket.app.core.SdEngineState.ERROR) {
+                                Text(
+                                    vm.sdEngineError ?: "",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if (vm.sdEngineUrl == null) {
+                                if (vm.sdEngineState == com.neuropocket.app.core.SdEngineState.ERROR) {
+                                    Button(onClick = { vm.retrySdEngine() },
+                                        modifier = Modifier.weight(1f)) { Text("Повторить") }
+                                    OutlinedButton(onClick = { vm.deleteSdEngine() },
+                                        modifier = Modifier.weight(1f)) { Text("Удалить движок") }
+                                } else if (vm.sdEngineUrl == null) {
                                     OutlinedButton(onClick = { vm.resolveSdEngineUrl() },
                                         enabled = !vm.sdEngineBusy, modifier = Modifier.weight(1f)) {
                                         Text(if (vm.sdEngineBusy) "Ищу…" else "Найти движок")
@@ -861,6 +872,14 @@ fun ToolsScreen(
                                     }, modifier = Modifier.weight(1f)) { Text("Скачать (51 МБ)") }
                                 }
                             }
+                            DlRow(vm, "libnpsd.so")
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        if (vm.sdEngineState == com.neuropocket.app.core.SdEngineState.DOWNLOADING ||
+                            vm.sdEngineState == com.neuropocket.app.core.SdEngineState.VERIFYING ||
+                            vm.sdEngineState == com.neuropocket.app.core.SdEngineState.INSTALLING
+                        ) {
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
                             DlRow(vm, "libnpsd.so")
                             Spacer(Modifier.height(4.dp))
                         }
@@ -1017,7 +1036,7 @@ fun ToolsScreen(
             text = {
                 Text(
                     "Имя: ${f.name}\n" +
-                        "Размер: ${try { f.length() / 1048576 } catch (_: Exception) { -1 }} МБ\n" +
+                        "Размер: ${vm.displaySizeMb(f)} МБ\n" +
                         "Тип: ${com.neuropocket.app.core.ModelRoles.describeFile(f.name)}"
                 )
             },

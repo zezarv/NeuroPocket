@@ -27,6 +27,13 @@ class UpdatePolicyTest {
         assertEquals(UpdatePolicy.Decision.UNKNOWN, UpdatePolicy.decide("v1.25.0", null))
         assertEquals(UpdatePolicy.Decision.UNKNOWN, UpdatePolicy.decide("", ""))
     }
+    @Test fun `malformed unknown not silent`() {
+        assertEquals(
+            UpdatePolicy.Decision.UNKNOWN,
+            UpdatePolicy.decide("release-latest", "1.24.0")
+        )
+        assertEquals(UpdatePolicy.Decision.UNKNOWN, UpdatePolicy.decide("v1.25.0", "???"))
+    }
     @Test fun `downgrade never offered`() {
         // verifyUpdateApk дополнительно блокирует по versionCode; политика — по имени
         assertFalse(UpdatePolicy.shouldOffer("1.24.0-rc.1", "1.24.0"))

@@ -1,0 +1,54 @@
+# Phase A review CI: pure-JVM checks only, no secrets, no native build.
+# Unit tests for core logic (:app:testDebugUnitTest) also compile main Kotlin
+# (compileDebugKotlin runs in the same task graph), which is the strongest
+# signal we can get cheaply on a hosted runner.
+# Full native (CMake/NDK/llama) release builds stay local (Phase F) — the
+# hosted environment is not trusted for that and it is intentionally absent here.
+name: phase-a-core-check
+
+on:
+  push:
+    branches: [ "review/v1.25-phase-a", "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  core-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Whitespace check
+        run: git diff --check
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install platform + build-tools
+        run: |
+          sdkmanager --licenses > /dev/null
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Gradle wrapper validation
+        uses: gradle/wrapper-validation-action@v2
+
+      - name: Core unit tests (also compiles main Kotlin)
+        run: ./gradlew :app:testDebugUnitTest --tests "com.neuropocket.app.core.*" --rerun-tasks --stacktrace
+        env:
+          GRADLE_OPTS: -Dorg.gradle.caching=false
+
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-test-results
+          path: app/build/test-results/testDebugUnitTest/*.xml
