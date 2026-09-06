@@ -1,5 +1,12 @@
 package com.neuropocket.app.data
 
+import com.neuropocket.app.core.AnalyzerWorkflow
+import com.neuropocket.app.core.ImproverWorkflow
+import com.neuropocket.app.core.SummarizerWorkflow
+import com.neuropocket.app.core.ToolChunking
+import com.neuropocket.app.core.TranslatorWorkflow
+import com.neuropocket.app.core.VibeCodeWorkflow
+
 /**
  * Текстовые инструменты — у каждого своя среда и своя история.
  * История хранится отдельно от общего чата: Map toolId -> runs.
@@ -52,6 +59,7 @@ object ToolCatalog {
 
     fun byId(id: String): ToolDef? = textTools.find { it.id == id }
 
+    // Legacy single-shot prompt (оставлен для совместимости истории/старых вызовов).
     fun buildPrompt(def: ToolDef, input: String, langFrom: String, langTo: String): String {
         val t = input.take(3000)
         return when (def.id) {
@@ -63,6 +71,47 @@ object ToolCatalog {
             "detector" -> "Разбери текст. Верни строго: Язык: … | Тон: … | Проблемы: … | Оценка 1–5:\n\n$t"
             else -> t
         }
+    }
+
+    // ---- Phase B: workflow-промпты (чанки, режимы, structured output) ----
+
+    fun translatorChunk(
+        chunk: String, src: String, dst: String,
+        preserveFormatting: Boolean = true, formality: String = "neutral",
+        glossary: String = "", idx: Int = 0, total: Int = 1
+    ): String = TranslatorWorkflow.buildChunkPrompt(
+        chunk, src, dst,
+        TranslatorWorkflow.Options(preserveFormatting, formality, glossary), idx, total
+    )
+
+    fun summarizerSingle(text: String, mode: String = "short"): String =
+        SummarizerWorkflow.buildSinglePrompt(text.take(12000), mode)
+
+    fun summarizerChunk(chunk: String, idx: Int, total: Int): String =
+        SummarizerWorkflow.buildChunkPrompt(chunk, idx, total)
+
+    fun summarizerSynth(locals: String, mode: String = "short"): String =
+        SummarizerWorkflow.buildSynthPrompt(locals.take(12000), mode)
+
+    fun improver(text: String, mode: String = "natural"): String =
+        ImproverWorkflow.buildPrompt(text.take(12000), mode)
+
+    fun analyzer(text: String): String =
+        AnalyzerWorkflow.buildPrompt(text.take(12000))
+
+    fun analyzerRepair(text: String, bad: String): String =
+        AnalyzerWorkflow.buildRepairPrompt(text, bad)
+
+    fun vibecode(task: String, language: String = "", framework: String = "", context: String = ""): String =
+        VibeCodeWorkflow.buildPrompt(task.take(8000), language.take(60), framework.take(80), context)
+
+    fun splitForTool(toolId: String, text: String): List<String> {
+        val max = when (toolId) {
+            "summarizer" -> 3000
+            "translator" -> 2500
+            else -> 2500
+        }
+        return ToolChunking.splitSmart(text, max)
     }
 }
 

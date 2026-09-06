@@ -1617,23 +1617,126 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---------- Среды инструментов (своя история у каждой) ----------
+    // Phase B: workflow-выполнение (chunking, режимы, structured output, честность).
+    var toolShareText by mutableStateOf<String?>(null); private set
+    fun consumeToolShare(): String? {
+        val s = toolShareText
+        toolShareText = null
+        return s
+    }
+
     fun toolHistory(id: String): List<ToolRun> = toolRuns[id] ?: emptyList()
 
-    fun runTool(toolId: String, input: String, langFrom: String = "", langTo: String = "") {
+    fun runTool(
+        toolId: String, input: String, langFrom: String = "", langTo: String = "",
+        mode: String = "", extra: String = "",
+        preserveFormatting: Boolean = true, formality: String = "neutral",
+        glossary: String = "", vibeLang: String = "", vibeFramework: String = ""
+    ) {
         val def = com.neuropocket.app.data.ToolCatalog.byId(toolId) ?: return
         if (input.isBlank() || toolBusyId != null || deviceBusy() || pBusy) return
+        val validation = com.neuropocket.app.core.ToolWorkflowRegistry.validate(toolId, input)
+        if (validation != null) {
+            status = validation
+            return
+        }
         stopSpeak()
         toolBusyId = toolId
         viewModelScope.launch(Dispatchers.IO) {
             llama.maxTokens = maxTokens; llama.topP = topP; llama.topK = topK
             engineNotice()?.let { n -> withContext(Dispatchers.Main) { status = n } }
             val p = activePersona ?: Persona()
-            val prompt = com.neuropocket.app.data.ToolCatalog.buildPrompt(def, input, langFrom, langTo)
-            val out = try {
-                withFallbackEngine(chatEngineFor(p)).generate(emptyList(), p, prompt)
+            val engine = withFallbackEngine(chatEngineFor(p))
+            val engineName = try { engine.engineName } catch (_: Exception) { "?" }
+            val engineReal = try { engine.isLocalReal } catch (_: Exception) { false }
+            suspend fun gen(prompt: String): String {
+                return try {
+                    engine.generate(emptyList(), p, prompt)
+                } catch (e: Exception) { "[Ошибка: ${e.message?.take(120)}]" }
+            }
+            var srcLang = ""
+            var dstLang = ""
+            var modeStored = mode
+            var optsStored = ""
+            val out: String = try {
+                when (toolId) {
+                    "translator" -> {
+                        srcLang = langFrom.ifBlank { "авто" }
+                        dstLang = langTo.ifBlank { "русский" }
+                        optsStored = "fmt=$preserveFormatting;form=$formality" +
+                            (if (glossary.isNotBlank()) ";gloss=${glossary.take(200)}" else "")
+                        val chunks = com.neuropocket.app.data.ToolCatalog.splitForTool(toolId, input)
+                        if (chunks.size <= 1) {
+                            com.neuropocket.app.data.ToolCatalog.translatorChunk(
+                                input, srcLang, dstLang, preserveFormatting, formality, glossary, 0, 1
+                            ).let { gen(it) }
+                        } else {
+                            val parts = chunks.mapIndexed { idx, ch ->
+                                gen(
+                                    com.neuropocket.app.data.ToolCatalog.translatorChunk(
+                                        ch, srcLang, dstLang, preserveFormatting, formality, glossary, idx, chunks.size
+                                    )
+                                )
+                            }
+                            com.neuropocket.app.core.ToolChunking.joinOrdered(parts)
+                        }
+                    }
+                    "summarizer" -> {
+                        val m = mode.ifBlank { "short" }
+                        modeStored = m
+                        val chunks = com.neuropocket.app.data.ToolCatalog.splitForTool(toolId, input)
+                        if (chunks.size <= 1) {
+                            gen(com.neuropocket.app.data.ToolCatalog.summarizerSingle(input.take(12000), m))
+                        } else {
+                            // chunk -> local summaries -> final synthesis (не только первые N символов)
+                            val locals = chunks.mapIndexed { idx, ch ->
+                                gen(com.neuropocket.app.data.ToolCatalog.summarizerChunk(ch.take(4000), idx, chunks.size))
+                            }
+                            gen(
+                                com.neuropocket.app.data.ToolCatalog.summarizerSynth(
+                                    locals.joinToString("\n\n"), m
+                                )
+                            )
+                        }
+                    }
+                    "improver" -> {
+                        val m = mode.ifBlank { "natural" }
+                        modeStored = m
+                        gen(com.neuropocket.app.data.ToolCatalog.improver(input.take(12000), m))
+                    }
+                    "detector" -> {
+                        val first = gen(com.neuropocket.app.data.ToolCatalog.analyzer(input.take(12000)))
+                        // 1 bounded repair attempt при невалидном structured output
+                        if (com.neuropocket.app.core.AnalyzerWorkflow.needsRepair(first) &&
+                            !first.startsWith("[Ошибка") && !first.startsWith("[Остановлено")
+                        ) {
+                            val repair = gen(com.neuropocket.app.data.ToolCatalog.analyzerRepair(input.take(4000), first))
+                            if (!com.neuropocket.app.core.AnalyzerWorkflow.needsRepair(repair)) repair else first
+                        } else first
+                    }
+                    "vibecode" -> {
+                        modeStored = vibeLang.ifBlank { "" } + (if (vibeFramework.isNotBlank()) " • $vibeFramework" else "")
+                        optsStored = extra.take(300)
+                        gen(
+                            com.neuropocket.app.data.ToolCatalog.vibecode(
+                                input, vibeLang, vibeFramework, extra
+                            )
+                        )
+                    }
+                    else -> gen(com.neuropocket.app.data.ToolCatalog.buildPrompt(def, input.take(8000), langFrom, langTo))
+                }
             } catch (e: Exception) { "[Ошибка: ${e.message?.take(120)}]" }
+            val isMockOut = try {
+                com.neuropocket.app.core.CapabilityDisclosure.isMockOutput(out)
+            } catch (_: Exception) { false }
+            val mockFlag = (!engineReal) || isMockOut
             val map = Store.loadToolMap(ctx).toMutableMap()
-            val nl = (map[toolId] ?: emptyList()) + ToolRun(input = input.take(2000), output = out.take(4000))
+            val nl = (map[toolId] ?: emptyList()) + ToolRun(
+                input = input.take(8000), output = out.take(12000),
+                toolId = toolId, sourceLang = srcLang, targetLang = dstLang,
+                mode = modeStored.take(60), options = optsStored.take(400),
+                engine = engineName.take(120), mockFallback = mockFlag
+            )
             map[toolId] = nl.takeLast(50)
             Store.saveToolMap(ctx, map)
             withContext(Dispatchers.Main) {
@@ -1641,6 +1744,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 toolBusyId = null
             }
         }
+    }
+
+    /** Импорт текстового файла для Summarizer/VibeCode (безопасный, bounded). */
+    fun importTextFile(uri: android.net.Uri, maxChars: Int = 60000): String? {
+        return try {
+            ctx.contentResolver.openInputStream(uri)?.use { ins ->
+                val bytes = ins.readBytes().take(200000).toByteArray()
+                var text = try {
+                    bytes.toString(Charsets.UTF_8)
+                } catch (_: Exception) { return null }
+                // грубая проверка что это текст, а не бинарник
+                val nonText = text.count { it == '\u0000' }
+                if (nonText > 0) return null
+                text = text.replace("\r\n", "\n").trim()
+                if (text.isBlank()) return null
+                text.take(maxChars)
+            }
+        } catch (_: Exception) { null }
     }
 
     fun clearTool(id: String) { viewModelScope.launch(Dispatchers.IO) {
@@ -3410,9 +3531,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     /** Входящий шаринг текста из других приложений. */
     fun handleSharedText(t: String) {
         if (t.isBlank()) return
-        chatDraft = t.take(4000)
+        val cut = t.take(20000)
+        chatDraft = cut.take(4000)
+        // Phase B: тот же текст доступен инструментам (Translator/Summarizer/Improver).
+        toolShareText = cut.take(20000)
         shareTarget = "chat"
-        status = "Текст из шаринга — в поле ввода."
+        status = "Текст из шаринга — в поле ввода. Можно открыть в Переводчике/Саммари."
+    }
+
+    /** Направить входящий/выбранный текст сразу в инструмент. */
+    fun handleSharedTextForTool(t: String, toolId: String) {
+        if (t.isBlank()) return
+        toolShareText = t.take(20000)
+        shareTarget = "tool:$toolId"
+        status = "Текст передан в инструмент."
     }
 
     /** Входящий шаринг картинки: копия в pictures + открыть фото-вопрос. */

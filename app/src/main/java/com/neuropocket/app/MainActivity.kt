@@ -119,9 +119,13 @@ class MainActivity : ComponentActivity() {
                     if (zone != null) vm.onEnterScreen(zone)
                 }
                 LaunchedEffect(vm.shareTarget) {
-                    when (vm.consumeShareTarget()) {
+                    when (val r = vm.consumeShareTarget()) {
                         "chat" -> { overlay = null; hubRoute = null; tab = 1 }
                         "tools:vision" -> { overlay = null; hubRoute = "tools:vision"; tab = 0 }
+                        // Phase B: шаринг текста сразу в инструмент.
+                        else -> if (r?.startsWith("tool:") == true) {
+                            overlay = r; hubRoute = null
+                        }
                     }
                 }
 

@@ -42,7 +42,15 @@ data class ToolRun(
     val id: String = java.util.UUID.randomUUID().toString(),
     val input: String = "",
     val output: String = "",
-    val ts: Long = System.currentTimeMillis()
+    val ts: Long = System.currentTimeMillis(),
+    // Phase B: workflow-контекст (все с дефолтами — старые записи читаются).
+    val toolId: String = "",
+    val sourceLang: String = "",
+    val targetLang: String = "",
+    val mode: String = "",
+    val options: String = "",
+    val engine: String = "",
+    val mockFallback: Boolean = false
 )
 
 @Serializable
@@ -84,7 +92,11 @@ data class SocialPost(
     val authorId: String,
     val text: String,
     val ts: Long = System.currentTimeMillis(),
-    val likes: Int = (0..500).random(),
+    // Personal edition: новый пост стартует с 0 (никаких random likes).
+    val likes: Int = 0,
     val liked: Boolean = false,
-    val aiMade: Boolean = false
+    val aiMade: Boolean = false,
+    // Phase B: честная связь репоста + пометка template-fallback.
+    val repostOfId: String? = null,
+    val template: Boolean = false
 )
